@@ -1,0 +1,50 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+develop-eggs/
+wheels/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ---- Project data & artifacts ----
+# FastF1 telemetry cache (build-time only, never committed)
+data/raw_telemetry/
+# Training outputs
+checkpoints/
+runs/
+wandb/
+outputs/
+*.mp4
+*.pt
+*.ckpt
+
+# Processed tracks are build artifacts; uncomment to keep them out of git.
+# data/tracks/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Claude Code ----
+# Local, machine-specific settings (permissions etc.). Shared settings.json is kept.
+.claude/settings.local.json
