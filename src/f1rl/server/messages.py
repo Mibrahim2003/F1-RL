@@ -1,10 +1,10 @@
 """Inbound client -> server WebSocket messages (Pydantic v2).
 
-The browser sends four message kinds — ``input``, ``mode``, ``control``, ``record`` —
-all discriminated on a ``type`` field. :func:`parse_client_message` dispatches on that
-field and returns ``None`` for anything unknown or malformed, so the socket loop never
+The browser sends five message kinds — ``input``, ``mode``, ``control``, ``record``,
+``track`` — all discriminated on a ``type`` field. :func:`parse_client_message` dispatches on
+that field and returns ``None`` for anything unknown or malformed, so the socket loop never
 raises on bad input. Outbound ``state`` frames are produced by :class:`f1rl.sim.loop.SimLoop`
-and are not modeled here.
+and are not modeled here. ``SurfaceEdit`` models the ``POST /track/{id}/surfaces`` HTTP body.
 """
 
 from __future__ import annotations
@@ -72,13 +72,51 @@ class RecordMessage(BaseModel):
     action: Literal["start", "stop"]
 
 
-ClientMessage = InputMessage | ModeMessage | ControlMessage | RecordMessage
+class TrackMessage(BaseModel):
+    """Switch the live session to a different circuit (Phase 2 track selector)."""
+
+    type: Literal["track"] = "track"
+    id: str
+
+
+class SurfaceEdit(BaseModel):
+    """Edited surface band widths for ``POST /track/{id}/surfaces`` (uniform, meters).
+
+    All bands are optional; only the provided ones are applied. Values are bound-checked so a
+    bad slider value can never write a degenerate track. ``condition`` (dry/wet) is accepted
+    for forward-compatibility with the Phase 3 grip model but is a no-op in Phase 2.
+    """
+
+    half_width_left: float | None = None
+    half_width_right: float | None = None
+    kerb_width: float | None = None
+    grass_width: float | None = None
+    gravel_width: float | None = None
+    condition: Literal["dry", "wet"] | None = None
+
+    @field_validator("half_width_left", "half_width_right")
+    @classmethod
+    def _check_half(cls, v: float | None) -> float | None:
+        if v is not None and not (0.5 <= v <= 25.0):
+            raise ValueError("half width must be in [0.5, 25] m")
+        return v
+
+    @field_validator("kerb_width", "grass_width", "gravel_width")
+    @classmethod
+    def _check_band(cls, v: float | None) -> float | None:
+        if v is not None and not (0.0 <= v <= 50.0):
+            raise ValueError("band width must be in [0, 50] m")
+        return v
+
+
+ClientMessage = InputMessage | ModeMessage | ControlMessage | RecordMessage | TrackMessage
 
 _PARSERS: dict[str, type[BaseModel]] = {
     "input": InputMessage,
     "mode": ModeMessage,
     "control": ControlMessage,
     "record": RecordMessage,
+    "track": TrackMessage,
 }
 
 

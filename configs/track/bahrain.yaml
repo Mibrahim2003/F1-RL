@@ -1,0 +1,38 @@
+# bahrain — Bahrain. SI units (meters, seconds). Drives the offline build pipeline
+# (f1rl.track.build) and the server's per-track meta (pole_time_s, total_laps).
+id: bahrain
+country: "Bahrain"
+official_length_m: 5412
+pole_time_s: 89.2
+total_laps: 57
+source: fastf1            # actual source recorded on the built Track
+
+# Centerline resampling
+spacing: 3.0                 # m, uniform sample spacing
+smoothing: 0.0               # spline smoothing (0 = interpolate the trace)
+
+# Asphalt half-widths (per side, m) used where OSM width is not enabled/available.
+half_width: 6.5
+half_width_straight: 7.5   # widen toward this on low-curvature straights
+min_half_width: 3.0
+max_half_width: 12.0
+
+# Surface bands past the asphalt edge (m)
+kerb_width: 1.0
+grass_width: 8.0
+gravel_width: 6.0
+gravel_on_corners: true    # gravel runoff at corner zones (false for street circuits)
+corner_kappa: 0.004          # |curvature| (1/m) above which a sample counts as a corner
+
+# Scale check
+length_tolerance: 0.05
+
+fastf1:
+  event: "Bahrain Grand Prix"
+  year: 2024
+  session: Q
+
+osm:
+  enabled: false          # set true + relation/bbox to refine widths from OSM
+  relation: null
+  bbox: null

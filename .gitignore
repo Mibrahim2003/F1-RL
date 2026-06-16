@@ -36,8 +36,10 @@ outputs/
 *.pt
 *.ckpt
 
-# Processed tracks are build artifacts; uncomment to keep them out of git.
+# Processed tracks are committed as the cache (rollback plan §f); uncomment to drop them.
 # data/tracks/
+# Surface-editor rollback backups are local-only.
+data/tracks/*.npz.bak
 # Recorded trajectories (Phase 1 app)
 recordings/
 

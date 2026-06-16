@@ -15,16 +15,45 @@ export interface StartFinish {
 
 export interface Track {
   name: string;
+  country: string;
   closed: boolean;
   length: number;
+  official_length_m: number;
+  length_error: number | null;
+  source: string;
+  low_confidence: boolean;
   centerline: [number, number][];
   tangent: [number, number][];
   normal: [number, number][];
   half_width_left: number[];
   half_width_right: number[];
-  runoff_width: number[];
+  kerb_width: number[];
+  grass_width: number[];
+  gravel_width: number[];
   bounds: Bounds;
   start_finish: StartFinish;
+}
+
+/** Lightweight catalog entry from GET /api/tracks (the selector source). */
+export interface TrackSummary {
+  id: string;
+  name: string;
+  country: string;
+  length: number;
+  official_length_m: number;
+  turns: number;
+  source: string;
+  low_confidence: boolean;
+}
+
+/** Edited surface band widths sent to POST /track/{id}/surfaces (uniform, meters). */
+export interface SurfaceEdit {
+  half_width_left?: number;
+  half_width_right?: number;
+  kerb_width?: number;
+  grass_width?: number;
+  gravel_width?: number;
+  condition?: "dry" | "wet";
 }
 
 export interface Meta {
@@ -64,11 +93,16 @@ export interface EventMessage {
   type: "event";
   event: string;
   id?: string;
+  // track_changed carries the new circuit's pace meta (mirrors GET /api/meta).
+  control_hz?: number;
+  pole_time_s?: number;
+  total_laps?: number;
+  pole_str?: string;
 }
 
 export type ServerMessage = StateFrame | EventMessage;
 
-export type Mode = "manual" | "watch" | "replay";
+export type Mode = "manual" | "watch" | "replay" | "configure";
 
 export interface InputMessage {
   type: "input";
@@ -78,9 +112,17 @@ export interface InputMessage {
   reset: boolean;
 }
 
+/** Server-side sim modes (no "configure"; that is a client-only view). */
+export type SimMode = "manual" | "watch" | "replay";
+
 export interface ModeMessage {
   type: "mode";
-  mode: Mode;
+  mode: SimMode;
+}
+
+export interface TrackMessage {
+  type: "track";
+  id: string;
 }
 
 export interface ControlMessage {
@@ -94,7 +136,12 @@ export interface RecordMessage {
   action: "start" | "stop";
 }
 
-export type ClientMessage = InputMessage | ModeMessage | ControlMessage | RecordMessage;
+export type ClientMessage =
+  | InputMessage
+  | ModeMessage
+  | ControlMessage
+  | RecordMessage
+  | TrackMessage;
 
 /** Recording trajectory served by GET /recordings/{id}. */
 export interface RecordingFrame {

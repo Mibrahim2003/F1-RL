@@ -36,9 +36,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Offline circuit-build pipeline (FastF1 telemetry -> processed Track .npz).
+# Offline circuit-build pipeline (FastF1 shape + OSM/Overpass width -> processed Track .npz).
 # Run once per circuit at build time; never imported in the training loop.
-trackbuild = ["fastf1>=3.4"]
+trackbuild = ["fastf1>=3.4", "shapely>=2.0", "requests>=2.31"]
 
 # Linting, formatting, and tests.
 dev = [

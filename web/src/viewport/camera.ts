@@ -52,6 +52,23 @@ export class Camera {
     this.follow = false;
   }
 
+  /**
+   * The world→device transform as a 6-tuple [a,b,c,d,e,f] for ctx.setTransform,
+   * folding in the device-pixel ratio. World y is up; screen y is down, so d is negative.
+   * Lets the renderer draw cached world-meter Path2D geometry directly (pan/zoom aware).
+   */
+  viewMatrix(dpr: number): [number, number, number, number, number, number] {
+    const s = this.scale;
+    return [
+      dpr * s,
+      0,
+      0,
+      -dpr * s,
+      dpr * (this.viewW / 2 - this.center.x * s),
+      dpr * (this.viewH / 2 + this.center.y * s),
+    ];
+  }
+
   worldToScreen(p: Vec2): Vec2 {
     return {
       x: this.viewW / 2 + (p.x - this.center.x) * this.scale,

@@ -3,8 +3,8 @@
 import type {
   ClientMessage,
   EventMessage,
-  Mode,
   ServerMessage,
+  SimMode,
   StateFrame,
 } from "../types.ts";
 
@@ -94,8 +94,12 @@ export class SimSocket {
     this.send({ type: "input", steer, throttle, brake, reset });
   }
 
-  sendMode(mode: Mode): void {
+  sendMode(mode: SimMode): void {
     this.send({ type: "mode", mode });
+  }
+
+  sendTrack(id: string): void {
+    this.send({ type: "track", id });
   }
 
   sendControl(action: "play" | "pause" | "restart", speed?: 1 | 2 | 4): void {
