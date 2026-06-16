@@ -38,6 +38,13 @@ outputs/
 
 # Processed tracks are build artifacts; uncomment to keep them out of git.
 # data/tracks/
+# Recorded trajectories (Phase 1 app)
+recordings/
+
+# ---- Web frontend (web/) ----
+web/node_modules/
+web/dist/
+web/.vite/
 
 # ---- Editor / OS ----
 .vscode/

@@ -1,0 +1,11 @@
+# Per-circuit config for the Phase 1 procedural oval.
+# All values are SI (meters, seconds). Real circuits get their own file here in Phase 2.
+
+id: oval
+straight_length: 900.0  # m, each straight
+corner_radius: 180.0    # m, each semicircular end
+half_width: 7.0          # m, half the asphalt width (~14 m total)
+runoff_width: 12.0       # m, grass/gravel beyond each edge
+spacing: 5.0             # m, centerline sample spacing
+pole_time_s: 47.5        # placeholder pole reference (~ a clean lap) for delta-to-pole
+total_laps: 30           # lap counter target shown in the HUD

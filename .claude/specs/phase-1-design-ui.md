@@ -1,6 +1,6 @@
 # Phase 1 Spec: Application Shell and Race Viewer
 
-Status: draft for plan mode. Branch: `phase-1-design-ui`.
+Status: **approved — web confirmed**. The plan (`.claude/plans/tranquil-leaping-haven.md`) is approved and the open questions below are resolved. Branch: `phase-1-design-ui`.
 
 ---
 
@@ -107,6 +107,8 @@ The current state is a static UI prototype from Claude Design. Visual only. No l
 
 ### b. Suggested or Proposed Solution
 
+**Resolved: web.** The web-vs-Pygame decision has been confirmed in favor of the web app, so this is now the chosen solution, not a proposal. The technical design (§11/§13/§15) has been updated to match.
+
 A web frontend plus a Python engine, connected by a local WebSocket for live modes, with file-based recorded-trajectory replay. A Canvas viewport draws the top-down scene.
 
 External components the solution interacts with or alters:
@@ -117,7 +119,7 @@ External components the solution interacts with or alters:
 
 Dependencies of the proposed solution:
 
-- Frontend: Vite, TypeScript, the Canvas 2D API, the chosen fonts, and the approved design tokens. React only if the prototype is already React.
+- Frontend: Vite, TypeScript (no framework), the Canvas 2D API, the chosen fonts, and the approved design tokens. The prototype is plain HTML/CSS/JS, so it is recreated as vanilla TypeScript + Vite — no React.
 - Backend: Python, FastAPI, uvicorn, NumPy, and the project physics and track modules.
 
 Pros of the proposed solution:
@@ -195,7 +197,7 @@ loop at 20 Hz:
 - User requirements: the approved prototype screen, now live.
 - UX and UI: the four regions wired to live data, the top bar, the viewport, the timing tower, and the telemetry and control bar. A mode switch. Playback controls active in replay. Pan and zoom on the viewport, with a camera-follow toggle.
 - Wireframes: the approved Claude Design screen is the reference. Each region behaves as follows. The top bar shows the wordmark, the circuit name, and a session clock. The viewport draws the oval and the car, with an optional debug overlay for the centerline and the start and finish line. The timing tower shows one row in Phase 1, the single car, with placeholder fields for gap and tyre. The bottom bar shows speed, current lap time, delta to pole, lap counter, and playback controls.
-- Link to the designer work: the approved Claude Design file. Add the link here.
+- Link to the designer work: the approved Claude Design (project "racing-telemetry-dashboard") is at `https://api.anthropic.com/v1/design/h/F_37Qt7vHu8vCoDSAe5pjQ?open_file=F1-SIM+Design+System.dc.html`. It is a plain HTML/CSS/JS handoff bundle, recreated as vanilla TypeScript + Vite.
 - Web concerns: the canvas renders at 60 frames per second, decoupled from the 20 Hz simulation, and interpolates between the last two received states. The canvas uses device-pixel-ratio scaling for crisp thin lines. The layout responds to the window size. Keyboard focus is handled so driving keys do not scroll the page.
 - Mobile concerns: out of scope. Desktop only.
 - UI states: loading, engine online, engine offline, manual driving, watching live, replay playing, replay paused, replay scrubbing, no trajectory selected, and error.
@@ -284,14 +286,15 @@ Alternate 3, a desktop shell, Electron or Tauri, wrapping the web UI with a Pyth
 
 ### a. Discussion
 
-- The main item to settle: a web frontend with a Python backend, versus the Pygame app named in the current technical design. This spec proposes web, for polish, shareability, and reuse of the approved prototype, at the cost of more moving parts. Confirm this, because it changes the rendering and input sections and means updating the technical design doc to match.
+- The main item to settle: a web frontend with a Python backend, versus the Pygame app named in the current technical design. **Resolved: web.** Chosen for polish, shareability, and reuse of the approved prototype, at the cost of more moving parts. The technical design's rendering and input sections (§11/§13/§15) have been updated to match.
 - Secondary: whether watch live in Phase 1 uses a simple centerline-following script, which is recommended to prove the live path, or waits until a policy exists.
 - Frontend framework: React or vanilla TypeScript, set by what Claude Design produced.
 
-### b. Open Questions
+### b. Open Questions (all resolved)
 
-- Web or Pygame for the application? Proposed: web. This is the one decision to confirm before plan mode.
-- Did Claude Design output plain HTML and CSS, or a React project? This sets the frontend toolchain.
-- The keyboard mapping for manual drive, arrows or WASD, and the throttle and brake scheme.
-- A placeholder pole time for the oval, so the delta has a reference in Phase 1.
-- Where recorded trajectories live, and whether the frontend loads them directly or through the backend.
+- Web or Pygame for the application? **Resolved: web.** Confirmed by the user.
+- Did Claude Design output plain HTML and CSS, or a React project? **Resolved: plain HTML/CSS/JS.** The frontend is recreated as vanilla TypeScript + Vite, no React.
+- The keyboard mapping for manual drive, arrows or WASD, and the throttle and brake scheme. **Resolved: both arrows and WASD.** Up/W = throttle, Down/S = brake, Left-Right/A-D = steer, R = reset; wired as `longitudinal = throttle − brake ∈ [−1, 1]`. Driving keys never scroll the page.
+- A placeholder pole time for the oval, so the delta has a reference in Phase 1. **Resolved:** a placeholder `pole_time_s` in `configs/track/oval.yaml`, currently `47.5 s`.
+- Where recorded trajectories live, and whether the frontend loads them directly or through the backend. **Resolved:** trajectories live in `recordings/*.json` (gitignored) and are served by the backend via `GET /recordings` (list) and `GET /recordings/{id}` (load); the frontend loads through the backend.
+- Watch-live in Phase 1: simple centerline-following script, or wait for a policy? **Resolved: include** a centerline pure-pursuit autopilot (`sim/autopilot.py`), so all three modes exist and the live path is proven before any policy.

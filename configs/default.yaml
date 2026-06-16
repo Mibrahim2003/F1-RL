@@ -1,0 +1,26 @@
+# Phase 1 global defaults. Every tunable constant lives here or in configs/track/ — none in
+# logic. All values are SI (meters, m/s, radians-from-degrees-where-noted, seconds, newtons, kg).
+
+seed: 42
+
+track_id: oval  # selects configs/track/<track_id>.yaml, merged in under `track:`
+
+sim:
+  control_hz: 20          # control step rate (dt_control = 1/20 = 0.05 s)
+  substeps: 5             # physics substeps per control step
+  dt_physics: 0.01        # 5 * 0.01 = 0.05 s, matches control_hz
+  grip: 1.0               # constant grip for the kinematic model
+
+physics:
+  wheelbase: 3.6          # m
+  mass: 798.0             # kg
+  max_steer_deg: 18.0     # steering angle at the wheels, degrees
+  max_engine_force: 6000.0    # N  (sets acceleration; with drag sets top speed ~92 m/s)
+  max_brake_force: 16000.0    # N
+  drag_coeff: 0.70        # N / (m/s)^2  (lumped 0.5 * rho * Cd * A)
+  rolling_coeff: 0.015    # dimensionless; rolling resistance = c * m * g
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+  recordings_dir: "recordings"

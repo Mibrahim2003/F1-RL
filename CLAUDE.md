@@ -39,6 +39,16 @@ The project uses Python 3.12 in a local venv (`.venv/`). Use the venv interprete
 
 Note: this is a Windows machine; the shell is PowerShell but a Bash tool is available. Two Pythons are managed by the `py` install manager (3.14 default, 3.12 for this project) — the venv is pinned to 3.12, so `requires-python` is capped at `<3.13` to avoid missing-wheel problems (torch/SB3/fastf1 lag the newest Python).
 
+The Phase 1 interactive app has two halves. Launch the Python backend, then the web frontend:
+
+```bash
+# Backend: FastAPI on uvicorn (needs an editable install or PYTHONPATH=src)
+.venv/Scripts/python.exe -m uvicorn f1rl.server.app:app
+
+# Frontend: Vite dev server (needs Node/npm)
+cd web && npm install && npm run dev   # then open the printed localhost URL
+```
+
 ## Architecture (the big picture)
 
 Target layout is `src/f1rl/` with a strict separation of concerns (full tree in `TECHNICAL_DESIGN.md` §13). The design's load-bearing ideas, which span multiple modules:
@@ -50,7 +60,8 @@ Target layout is `src/f1rl/` with a strict separation of concerns (full tree in 
 - **Observations are local/relative only — never absolute position.** This is what lets one policy generalize across the whole calendar.
 - **Reward forward progress and speed; never reward centerline proximity.** The racing line (late apexes, full track width) must emerge from the reward, not be hand-fed. Lap time is the evaluation scoreboard, not the training signal.
 - **Tracks are built offline and cached.** FastF1 is a **build-time-only** dependency that produces `data/tracks/<name>.npz`; it must never be imported in the training loop or called over the network during training.
-- **The renderer is never imported in the training hot path.** Training draws nothing for speed. Visibility comes from (a) an offscreen eval callback rendering one episode to mp4, and (b) the interactive Pygame app loading a checkpoint and running live. Rendering reads recorded trajectories.
+- **The interactive surface is a web app.** A Vite + TypeScript frontend with an HTML5 Canvas 2D viewport talks to a local FastAPI/uvicorn backend over a WebSocket that streams car state at the control rate. The backend runs the sim loop (`src/f1rl/sim/`) and serves track geometry and recorded trajectories; the frontend (`web/`) only renders and sends input. Four modes: manual drive, configure, watch live, replay.
+- **The web frontend is never in the training hot path.** Training draws nothing for speed, and the web app is never imported by it. Visibility comes from (a) an offscreen eval callback rendering one episode to mp4 (headless Pygame + imageio, unchanged by the web pivot), and (b) the interactive web app loading a checkpoint and running the agent live. The recorded-trajectory JSON format is the shared interchange across live sim, replay, and eval clips.
 
 ## Conventions that are easy to get wrong
 
