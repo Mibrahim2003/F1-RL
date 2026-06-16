@@ -50,3 +50,27 @@ def load_config(
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(overrides)))
     assert isinstance(cfg, DictConfig)
     return cfg
+
+
+def load_track_config(
+    track_id: str,
+    name: str = "default",
+    config_root: Path | None = None,
+) -> DictConfig:
+    """Load the base config but with ``cfg.track`` set to a chosen circuit.
+
+    Phase 2 needs to load any circuit's meta (``pole_time_s``, ``total_laps``, widths) at
+    runtime for the track selector, independent of ``default.yaml``'s ``track_id``. This
+    loads ``configs/track/<track_id>.yaml`` into ``cfg.track`` and sets ``cfg.track_id``.
+
+    Raises:
+        FileNotFoundError: If the circuit config does not exist.
+    """
+    root = config_root or CONFIG_ROOT
+    cfg = load_config(name, config_root=config_root)
+    track_path = root / "track" / f"{track_id}.yaml"
+    if not track_path.exists():
+        raise FileNotFoundError(f"Track config not found: {track_path}")
+    cfg.track_id = track_id
+    cfg.track = OmegaConf.load(track_path)
+    return cfg

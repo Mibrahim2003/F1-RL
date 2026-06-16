@@ -49,11 +49,22 @@ def test_curvature_zero_on_straights_and_positive_on_arcs():
 
 
 def test_widths_constant():
-    p = OvalParams(half_width=6.5, runoff_width=10.0)
+    p = OvalParams(half_width=6.5, kerb_width=1.2, runoff_width=10.0)
     track = build_oval(p)
     assert np.allclose(track.half_width_left, 6.5)
     assert np.allclose(track.half_width_right, 6.5)
-    assert np.allclose(track.runoff_width, 10.0)
+    # Phase-2 bands: runoff_width maps to grass; the oval has a thin kerb and no gravel.
+    assert np.allclose(track.kerb_width, 1.2)
+    assert np.allclose(track.grass_width, 10.0)
+    assert np.allclose(track.gravel_width, 0.0)
+
+
+def test_oval_metadata_and_confidence():
+    track = build_oval()
+    # The oval's official length equals its analytic length, so it is not flagged.
+    assert track.source == "procedural"
+    assert track.length_error is not None and track.length_error < 0.01
+    assert track.low_confidence is False
 
 
 def test_api_dict_is_json_friendly():
@@ -63,3 +74,5 @@ def test_api_dict_is_json_friendly():
     assert isinstance(d["centerline"], list)
     assert len(d["centerline"][0]) == 2
     assert "start_finish" in d and "point" in d["start_finish"]
+    for key in ("kerb_width", "grass_width", "gravel_width", "country", "source", "low_confidence"):
+        assert key in d

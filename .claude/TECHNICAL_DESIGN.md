@@ -144,22 +144,41 @@ class Track:
     curvature: np.ndarray         # (N,) signed, 1/m
     half_width_left: np.ndarray   # (N,) meters to the asphalt edge
     half_width_right: np.ndarray  # (N,)
-    runoff_width: np.ndarray      # (N,) meters of grass or gravel beyond the edge
+    kerb_width: np.ndarray        # (N,) red/white band past the asphalt edge
+    grass_width: np.ndarray       # (N,) green band past the kerb
+    gravel_width: np.ndarray      # (N,) sand/gravel band, where present
     gradient: np.ndarray          # (N,) slope, default zeros
     closed: bool                  # the lap loops
+    country: str                  # for the selector + flag
+    official_length_m: float      # published length, the scale check
+    source: str                   # "fastf1" | "osm" | "fastf1+osm" | "manual" | "procedural"
+    surface_zones: np.ndarray | None  # optional per-sample runoff label (0 grass, 1 gravel)
 ```
+
+> Phase-2 change (this is the authoritative schema): the single Phase-1 `runoff_width`
+> band is split into explicit `kerb_width` / `grass_width` / `gravel_width` bands (each a
+> width measured outward past the asphalt edge), and the build metadata `country`,
+> `official_length_m`, and `source` are added. `Track.length_error` and `Track.low_confidence`
+> are derived. The cached form round-trips via `Track.save_npz` / `Track.from_npz`.
 
 Offline build pipeline, run once per circuit, output cached to `data/tracks/<name>.npz`:
 
-1. Load a clean fast lap with FastF1 and read the X and Y position trace.
-2. Resample to uniform arc-length spacing of about 3 m with a SciPy spline.
-3. Smooth to remove telemetry noise.
-4. Assign track width. Default to a constant total width near 12 m, set per circuit in a track config where known.
-5. Compute tangent, normal, arc length, and signed curvature along the centerline.
-6. Define surface bands: asphalt inside the half-widths, a thin kerb band at the edge, then a runoff band of grass or gravel.
-7. Save the processed `Track`. The build script does every circuit in one pass.
+1. Acquire the shape from the best source: a clean FastF1 fast lap's X/Y position trace.
+2. Acquire width from OpenStreetMap (Overpass) where mapped — Shapely offsets the asphalt
+   edge polygons against the centerline — else fall back to a per-circuit config constant.
+3. Resample to uniform arc-length spacing of about 2–3 m with a periodic SciPy spline, smooth.
+4. Recenter to the centroid origin, in meters.
+5. Compute tangent, normal, arc length, and signed curvature (shared `track/geometry.py`).
+6. Define surface bands: asphalt inside the half-widths, a thin kerb band at the edge, then
+   grass and (where `surface_zones` says) gravel runoff, all from config.
+7. Validate: arc length within tolerance of `official_length_m`, Shapely `is_simple` edge
+   check, positive bounded widths. Flag low-confidence, never crash.
+8. Save the processed `Track` plus a row in `data/tracks/_build_report.json`. The build
+   script does every circuit in one pass and isolates per-circuit failures.
 
-Data caveats, documented and accepted: the centerline is real and accurate. Width, kerbs, and runoff are approximations, set in config, which is fine for the racing behavior the project wants. Gradient defaults to zero.
+Data caveats, documented and accepted: the centerline is real and accurate. Width, kerbs,
+and runoff are approximations, from OSM where mapped and config otherwise, refined by hand in
+the config UI — fine for the racing behavior the project wants. Gradient defaults to zero.
 
 One real gap: the new Madrid circuit has no historical telemetry, since 2026 is its first season. Build that track from a manual outline or a public map trace into the same `Track` schema. Flag any circuit that lacks telemetry rather than guessing.
 

@@ -1,12 +1,16 @@
 /**
- * Canvas 2D track + car renderer.
+ * Canvas 2D track + car renderer (Phase 2: layered real surfaces).
  *
- * - Draws the broadcast look from /track/oval geometry (meters):
- *   infield, asphalt ribbon, red/white kerbs, faint dashed racing line,
- *   start/finish line.
- * - Runs at ~60 fps and interpolates between the last two 20 Hz state
- *   frames (lerp position, wrap-aware lerp of yaw).
- * - DPR-aware so thin lines stay crisp.
+ * - Track geometry is built once into cached world-meter Path2D objects on
+ *   `setTrack` (grass/gravel runoff, asphalt, kerbs, racing line, start/finish).
+ *   Each frame the camera world→device matrix is applied via ctx.setTransform,
+ *   so pan/zoom/follow only changes a matrix — the heavy geometry is never rebuilt.
+ *   Line widths/dashes are recomputed per frame from the live scale (cheap).
+ * - Draws outside-in: infield → grass/gravel runoff → asphalt → kerb stripes →
+ *   racing line → start/finish → car glyph.
+ * - Car glyph: an oriented 5×2 m rectangle at the real F1 footprint (default), or a
+ *   circle+arrow (toggle). Kept visible by a minimum on-screen size when zoomed out.
+ * - Runs at ~60 fps and interpolates between the last two 20 Hz state frames.
  */
 
 import { Camera } from "./camera.ts";
@@ -15,15 +19,24 @@ import type { CarPose, Track } from "../types.ts";
 // Visual constants (mirror tokens.css viewport group).
 const C = {
   infield: "#19220F",
+  grass: "#1F3A14",
+  gravel: "#B89B6B",
   kerbLight: "#D2D6DF",
   kerbRed: "#C8202B",
   asphalt: "#3A3A46",
   racingLine: "#E10600",
   startFinish: "#F2F2F7",
   carBody: "#E10600",
-  carStroke: "rgba(0,0,0,0.5)",
+  carStroke: "rgba(0,0,0,0.6)",
+  carWindow: "rgba(0,0,0,0.35)",
   halo: "#E10600",
 };
+
+// Real F1 footprint (meters) for the rectangle glyph.
+const CAR_LENGTH_M = 5.0;
+const CAR_WIDTH_M = 2.0;
+
+export type GlyphStyle = "rect" | "arrow";
 
 interface TimedPose {
   t: number;
@@ -34,20 +47,31 @@ export interface DebugInfo {
   fps: number;
   stateHz: number;
   car: CarPose | null;
+  trackName: string;
+  trackLengthM: number;
 }
 
 export class Renderer {
   readonly camera = new Camera();
-  private ctx: Canvas2DContext;
+  private ctx: CanvasRenderingContext2D;
   private canvas: HTMLCanvasElement;
   private dpr = 1;
   private cssW = 1;
   private cssH = 1;
 
   private track: Track | null = null;
-  // left/right edge polylines (world meters), precomputed when track loads
-  private edgeL: [number, number][] = [];
-  private edgeR: [number, number][] = [];
+  private glyph: GlyphStyle = "rect";
+
+  // cached world-meter geometry (rebuilt only on setTrack)
+  private pInfield = new Path2D();
+  private pGrass = new Path2D();
+  private pGravel = new Path2D();
+  private pAsphalt = new Path2D();
+  private pKerbL = new Path2D();
+  private pKerbR = new Path2D();
+  private pRacingLine = new Path2D();
+  private pStartFinish = new Path2D();
+  private hasGravel = false;
 
   private prev: TimedPose | null = null;
   private curr: TimedPose | null = null;
@@ -58,6 +82,7 @@ export class Renderer {
   private frameTimes: number[] = [];
   private stateTimestamps: number[] = [];
   private lastDrawnCar: CarPose | null = null;
+  private lastReceived = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -76,14 +101,22 @@ export class Renderer {
     this.camera.setViewport(this.cssW, this.cssH);
   }
 
-  setTrack(track: Track): void {
+  setTrack(track: Track, refit = true): void {
     this.track = track;
-    this.precomputeEdges();
-    this.camera.fitTo(track.bounds);
+    this.buildPaths();
+    if (refit) this.camera.fitTo(track.bounds);
   }
 
   hasTrack(): boolean {
     return this.track !== null;
+  }
+
+  setGlyph(style: GlyphStyle): void {
+    this.glyph = style;
+  }
+
+  getGlyph(): GlyphStyle {
+    return this.glyph;
   }
 
   /** Feed a new authoritative car pose (from socket or replay). */
@@ -121,8 +154,6 @@ export class Renderer {
     return this.debugOn;
   }
 
-  private lastReceived = 0;
-
   /** Interpolated pose for the current wall-clock time. */
   private interpolatedPose(now: number): CarPose | null {
     if (!this.curr) return null;
@@ -146,172 +177,255 @@ export class Renderer {
     this.camera.updateFollow(pose ? { x: pose.x, y: pose.y } : null, dtMs);
 
     const ctx = this.ctx;
-    ctx.save();
+    // Clear in device space, then switch to the world→device matrix for everything else.
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.cssW, this.cssH);
 
     if (this.track) {
+      ctx.setTransform(...this.camera.viewMatrix(this.dpr));
       this.drawTrack(ctx);
       if (pose) {
         this.drawCar(ctx, pose);
         this.lastDrawnCar = pose;
       }
     }
-    ctx.restore();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   getDebugInfo(): DebugInfo {
-    return { fps: this.fps(), stateHz: this.stateHz(), car: this.lastDrawnCar };
+    return {
+      fps: this.fps(),
+      stateHz: this.stateHz(),
+      car: this.lastDrawnCar,
+      trackName: this.track?.name ?? "",
+      trackLengthM: this.track?.length ?? 0,
+    };
   }
 
-  // ---------- track drawing ----------
+  // ---------- track geometry (built once per track, in world meters) ----------
 
-  private precomputeEdges(): void {
+  private buildPaths(): void {
     const tk = this.track;
     if (!tk) return;
-    this.edgeL = tk.centerline.map((c, i) => {
-      const n = tk.normal[i];
-      const w = tk.half_width_left[i];
-      return [c[0] + n[0] * w, c[1] + n[1] * w] as [number, number];
-    });
-    this.edgeR = tk.centerline.map((c, i) => {
-      const n = tk.normal[i];
-      const w = tk.half_width_right[i];
-      return [c[0] - n[0] * w, c[1] - n[1] * w] as [number, number];
-    });
+    const off = (i: number, w: number): [number, number] => [
+      tk.centerline[i][0] + tk.normal[i][0] * w,
+      tk.centerline[i][1] + tk.normal[i][1] * w,
+    ];
+
+    const edgeL: [number, number][] = [];
+    const edgeR: [number, number][] = [];
+    const runoffL: [number, number][] = [];
+    const runoffR: [number, number][] = [];
+    for (let i = 0; i < tk.centerline.length; i++) {
+      const hl = tk.half_width_left[i];
+      const hr = tk.half_width_right[i];
+      // grass is the outer runoff extent past the kerb; gravel sits within it where present.
+      const outL = hl + tk.kerb_width[i] + tk.grass_width[i];
+      const outR = hr + tk.kerb_width[i] + tk.grass_width[i];
+      edgeL.push(off(i, hl));
+      edgeR.push(off(i, -hr));
+      runoffL.push(off(i, outL));
+      runoffR.push(off(i, -outR));
+    }
+
+    // Infield: the region enclosed by the centerline.
+    this.pInfield = ringPath(tk.centerline);
+    // Grass runoff: ring between the outer runoff edge and the asphalt edge (even-odd hole).
+    this.pGrass = ribbonPath(runoffL, runoffR);
+    // Asphalt ribbon between the two asphalt edges.
+    this.pAsphalt = ribbonPath(edgeL, edgeR);
+    // Kerb stripes follow each asphalt edge.
+    this.pKerbL = openPath(edgeL, true);
+    this.pKerbR = openPath(edgeR, true);
+    // Racing line along the centerline.
+    this.pRacingLine = openPath(tk.centerline, tk.closed);
+    // Gravel patches: quads over the kerb→gravel band wherever gravel_width > 0.
+    this.buildGravel(tk);
+    // Start/finish line across the track at sample 0.
+    this.buildStartFinish(edgeL[0], edgeR[0]);
+  }
+
+  private buildGravel(tk: Track): void {
+    const path = new Path2D();
+    const n = tk.centerline.length;
+    let any = false;
+    const at = (i: number, w: number): [number, number] => [
+      tk.centerline[i][0] + tk.normal[i][0] * w,
+      tk.centerline[i][1] + tk.normal[i][1] * w,
+    ];
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      for (const side of [1, -1]) {
+        const gi = tk.gravel_width[i];
+        const gj = tk.gravel_width[j];
+        if (gi <= 0 && gj <= 0) continue;
+        any = true;
+        const hi = side > 0 ? tk.half_width_left[i] : tk.half_width_right[i];
+        const hj = side > 0 ? tk.half_width_left[j] : tk.half_width_right[j];
+        const innerI = side * (hi + tk.kerb_width[i]);
+        const innerJ = side * (hj + tk.kerb_width[j]);
+        const outerI = side * (hi + tk.kerb_width[i] + Math.max(gi, 0));
+        const outerJ = side * (hj + tk.kerb_width[j] + Math.max(gj, 0));
+        const a = at(i, innerI);
+        const b = at(i, outerI);
+        const c = at(j, outerJ);
+        const d = at(j, innerJ);
+        path.moveTo(a[0], a[1]);
+        path.lineTo(b[0], b[1]);
+        path.lineTo(c[0], c[1]);
+        path.lineTo(d[0], d[1]);
+        path.closePath();
+      }
+    }
+    this.pGravel = path;
+    this.hasGravel = any;
+  }
+
+  private buildStartFinish(a: [number, number], b: [number, number]): void {
+    const p = new Path2D();
+    p.moveTo(a[0], a[1]);
+    p.lineTo(b[0], b[1]);
+    this.pStartFinish = p;
   }
 
   private drawTrack(ctx: CanvasRenderingContext2D): void {
-    const tk = this.track;
-    if (!tk) return;
+    const scale = this.camera.scale;
+    const px = (n: number) => n / scale; // n device-independent px expressed in world meters
 
-    // 1) infield fill (region enclosed by the centerline)
-    ctx.beginPath();
-    this.tracePolyline(ctx, tk.centerline, true);
+    // 1) infield
     ctx.fillStyle = C.infield;
-    ctx.fill();
+    ctx.fill(this.pInfield);
 
-    // 2) asphalt ribbon between the two edge polylines
-    ctx.beginPath();
-    this.tracePolyline(ctx, this.edgeL, true);
-    this.tracePolyline(ctx, this.edgeR, true);
+    // 2) grass runoff ring (even-odd: outer loop minus asphalt loop)
+    ctx.fillStyle = C.grass;
+    ctx.fill(this.pGrass, "evenodd");
+
+    // 3) gravel patches over the grass at corners
+    if (this.hasGravel) {
+      ctx.fillStyle = C.gravel;
+      ctx.fill(this.pGravel);
+    }
+
+    // 4) asphalt ribbon
     ctx.fillStyle = C.asphalt;
-    ctx.fill("evenodd");
+    ctx.fill(this.pAsphalt, "evenodd");
 
-    // 3) kerb bands along both edges (alternating red/white dashes)
-    this.drawKerb(ctx, this.edgeL);
-    this.drawKerb(ctx, this.edgeR);
+    // 5) kerb stripes (alternating red/white dashes) along both edges
+    this.drawKerb(ctx, this.pKerbL, px);
+    this.drawKerb(ctx, this.pKerbR, px);
 
-    // 4) faint dashed racing line along the centerline
+    // 6) faint dashed racing line
     ctx.save();
-    ctx.beginPath();
-    this.tracePolyline(ctx, tk.centerline, tk.closed);
     ctx.strokeStyle = C.racingLine;
     ctx.globalAlpha = 0.3;
-    ctx.lineWidth = Math.max(1, 0.4 * this.camera.scale);
-    ctx.setLineDash([1.6 * this.camera.scale, 3.4 * this.camera.scale]);
-    ctx.stroke();
+    ctx.lineWidth = Math.max(px(1), 0.4);
+    ctx.setLineDash([Math.max(px(2), 1.6), Math.max(px(4), 3.4)]);
+    ctx.stroke(this.pRacingLine);
     ctx.restore();
 
-    // 5) start/finish line (perpendicular to track at s=0)
-    this.drawStartFinish(ctx);
-  }
-
-  private drawKerb(ctx: CanvasRenderingContext2D, edge: [number, number][]): void {
-    const seg = 3.0; // meters per kerb segment
+    // 7) start/finish
     ctx.save();
-    ctx.lineWidth = Math.max(1.5, 0.9 * this.camera.scale);
-    ctx.lineJoin = "round";
-    const dashPx = seg * this.camera.scale;
-    ctx.setLineDash([dashPx, dashPx]);
-
-    ctx.beginPath();
-    this.tracePolyline(ctx, edge, true);
-    ctx.strokeStyle = C.kerbLight;
-    ctx.lineDashOffset = 0;
-    ctx.stroke();
-
-    ctx.beginPath();
-    this.tracePolyline(ctx, edge, true);
-    ctx.strokeStyle = C.kerbRed;
-    ctx.lineDashOffset = dashPx;
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  private drawStartFinish(ctx: CanvasRenderingContext2D): void {
-    const tk = this.track;
-    if (!tk) return;
-    const sf = tk.start_finish;
-    const p = { x: sf.point[0], y: sf.point[1] };
-    const n = sf.normal; // points across the track
-    const wl = tk.half_width_left[0] ?? 8;
-    const wr = tk.half_width_right[0] ?? 8;
-    const a = this.camera.worldToScreen({ x: p.x + n[0] * wl, y: p.y + n[1] * wl });
-    const b = this.camera.worldToScreen({ x: p.x - n[0] * wr, y: p.y - n[1] * wr });
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
     ctx.strokeStyle = C.startFinish;
     ctx.globalAlpha = 0.7;
-    ctx.lineWidth = Math.max(2, 0.6 * this.camera.scale);
-    ctx.stroke();
+    ctx.lineWidth = Math.max(px(2), 0.6);
+    ctx.stroke(this.pStartFinish);
     ctx.restore();
   }
 
-  private tracePolyline(
-    ctx: CanvasRenderingContext2D,
-    pts: [number, number][],
-    closed: boolean,
-  ): void {
-    if (pts.length === 0) return;
-    const first = this.camera.worldToScreen({ x: pts[0][0], y: pts[0][1] });
-    ctx.moveTo(first.x, first.y);
-    for (let i = 1; i < pts.length; i++) {
-      const s = this.camera.worldToScreen({ x: pts[i][0], y: pts[i][1] });
-      ctx.lineTo(s.x, s.y);
-    }
-    if (closed) ctx.closePath();
+  private drawKerb(ctx: CanvasRenderingContext2D, edge: Path2D, px: (n: number) => number): void {
+    const lw = Math.max(px(2), 0.9); // ~kerb band thickness in world meters, min 2 px
+    const dash = Math.max(px(6), 3.0);
+    ctx.save();
+    ctx.lineWidth = lw;
+    ctx.lineJoin = "round";
+    ctx.setLineDash([dash, dash]);
+
+    ctx.strokeStyle = C.kerbLight;
+    ctx.lineDashOffset = 0;
+    ctx.stroke(edge);
+
+    ctx.strokeStyle = C.kerbRed;
+    ctx.lineDashOffset = dash;
+    ctx.stroke(edge);
+    ctx.restore();
   }
 
-  // ---------- car drawing ----------
+  // ---------- car ----------
 
   private drawCar(ctx: CanvasRenderingContext2D, pose: CarPose): void {
-    const s = this.camera.worldToScreen({ x: pose.x, y: pose.y });
-    // world yaw is CCW with y-up; screen y is flipped, so negate.
-    const screenAngle = -pose.yaw;
-    // size the car ~5 m long; keep a sensible minimum on screen
-    const px = Math.max(8, this.camera.scale);
+    const scale = this.camera.scale;
+    // Real 5×2 m footprint, but never below ~9 px long so it stays visible when zoomed out.
+    const len = Math.max(CAR_LENGTH_M, 9 / scale);
+    const wid = len * (CAR_WIDTH_M / CAR_LENGTH_M);
+    const px = (n: number) => n / scale;
 
     ctx.save();
-    ctx.translate(s.x, s.y);
-    ctx.rotate(screenAngle);
+    ctx.translate(pose.x, pose.y);
+    ctx.rotate(pose.yaw); // world is y-up; the view matrix's y-flip makes CCW read correctly
 
-    // featured-car red halo
+    // featured-car halo
     ctx.beginPath();
-    ctx.arc(0, 0, px * 1.7, 0, Math.PI * 2);
+    ctx.arc(0, 0, len * 0.95, 0, Math.PI * 2);
     ctx.strokeStyle = C.halo;
-    ctx.globalAlpha = 0.45;
-    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = Math.max(px(2), len * 0.05);
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    // angular body polygon (prototype points scaled by px/11)
-    const u = px / 11;
+    if (this.glyph === "arrow") this.drawArrowGlyph(ctx, len, px);
+    else this.drawRectGlyph(ctx, len, wid, px);
+
+    ctx.restore();
+  }
+
+  private drawRectGlyph(
+    ctx: CanvasRenderingContext2D,
+    len: number,
+    wid: number,
+    px: (n: number) => number,
+  ): void {
+    const hl = len / 2;
+    const hw = wid / 2;
     ctx.beginPath();
-    ctx.moveTo(-8 * u, -5.5 * u);
-    ctx.lineTo(11 * u, 0);
-    ctx.lineTo(-8 * u, 5.5 * u);
-    ctx.lineTo(-3.5 * u, 0);
+    ctx.moveTo(hl, 0); // nose
+    ctx.lineTo(hl * 0.6, -hw);
+    ctx.lineTo(-hl, -hw);
+    ctx.lineTo(-hl, hw);
+    ctx.lineTo(hl * 0.6, hw);
     ctx.closePath();
     ctx.fillStyle = C.carBody;
     ctx.fill();
     ctx.strokeStyle = C.carStroke;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = Math.max(px(1), len * 0.03);
     ctx.stroke();
+    // cockpit hint
+    ctx.beginPath();
+    ctx.ellipse(-hl * 0.1, 0, len * 0.12, wid * 0.22, 0, 0, Math.PI * 2);
+    ctx.fillStyle = C.carWindow;
+    ctx.fill();
+  }
 
-    ctx.restore();
+  private drawArrowGlyph(
+    ctx: CanvasRenderingContext2D,
+    len: number,
+    px: (n: number) => number,
+  ): void {
+    const r = len * 0.42;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fillStyle = C.carBody;
+    ctx.fill();
+    ctx.strokeStyle = C.carStroke;
+    ctx.lineWidth = Math.max(px(1), len * 0.03);
+    ctx.stroke();
+    // forward arrow
+    ctx.beginPath();
+    ctx.moveTo(r * 1.4, 0);
+    ctx.lineTo(r * 0.2, -r * 0.6);
+    ctx.lineTo(r * 0.2, r * 0.6);
+    ctx.closePath();
+    ctx.fillStyle = C.startFinish;
+    ctx.fill();
   }
 
   // ---------- debug metrics ----------
@@ -335,7 +449,40 @@ export class Renderer {
   }
 }
 
-type Canvas2DContext = CanvasRenderingContext2D;
+// ---------- Path2D builders (world meters) ----------
+
+function ringPath(pts: [number, number][]): Path2D {
+  const p = new Path2D();
+  if (pts.length === 0) return p;
+  p.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i][0], pts[i][1]);
+  p.closePath();
+  return p;
+}
+
+/** Closed ribbon between two edge polylines (fill with "evenodd" for a hole). */
+function ribbonPath(outer: [number, number][], inner: [number, number][]): Path2D {
+  const p = new Path2D();
+  if (outer.length === 0) return p;
+  p.moveTo(outer[0][0], outer[0][1]);
+  for (let i = 1; i < outer.length; i++) p.lineTo(outer[i][0], outer[i][1]);
+  p.closePath();
+  if (inner.length) {
+    p.moveTo(inner[0][0], inner[0][1]);
+    for (let i = 1; i < inner.length; i++) p.lineTo(inner[i][0], inner[i][1]);
+    p.closePath();
+  }
+  return p;
+}
+
+function openPath(pts: [number, number][], closed: boolean): Path2D {
+  const p = new Path2D();
+  if (pts.length === 0) return p;
+  p.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i][0], pts[i][1]);
+  if (closed) p.closePath();
+  return p;
+}
 
 function wrapAngle(a: number): number {
   let x = a;

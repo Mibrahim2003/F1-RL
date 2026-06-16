@@ -11,8 +11,13 @@ export type UIState =
   | "replay-playing"
   | "replay-paused"
   | "replay-scrubbing"
+  | "configure"
+  | "loading-track"
   | "no-trajectory"
   | "error";
+
+/** Surface-editor lifecycle for the configure panel. */
+export type EditState = "clean" | "unsaved" | "saving" | "saved";
 
 export interface AppState {
   ui: UIState;
@@ -21,6 +26,10 @@ export interface AppState {
   running: boolean;
   speed: 1 | 2 | 4;
   errorMessage: string | null;
+  trackId: string;
+  loadingTrack: boolean;
+  edit: EditState;
+  lowConfidence: boolean;
 }
 
 type Listener = (s: Readonly<AppState>) => void;
@@ -33,6 +42,10 @@ export class Store {
     running: true,
     speed: 1,
     errorMessage: null,
+    trackId: "oval",
+    loadingTrack: false,
+    edit: "clean",
+    lowConfidence: false,
   };
   private listeners = new Set<Listener>();
 
@@ -58,6 +71,10 @@ export class Store {
     let ui: UIState;
     if (s.errorMessage) {
       ui = "error";
+    } else if (s.loadingTrack) {
+      ui = "loading-track";
+    } else if (s.mode === "configure") {
+      ui = "configure";
     } else if (s.mode === "replay") {
       ui = s.running ? "replay-playing" : "replay-paused";
     } else if (!s.engineConnected) {

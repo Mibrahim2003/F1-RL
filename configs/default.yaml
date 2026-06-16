@@ -24,3 +24,4 @@ server:
   host: "127.0.0.1"
   port: 8000
   recordings_dir: "recordings"
+  tracks_dir: "data/tracks"   # cached real-circuit .npz files (built offline)

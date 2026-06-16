@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-A 2D top-down Formula 1 simulator where every car is driven by a learned (PPO) policy, racing real 2026 circuits. Currently **early stage**: the design is complete and the package skeleton exists, but the simulation/RL code is not yet written.
+A 2D top-down Formula 1 simulator where every car is driven by a learned (PPO) policy, racing real 2026 circuits. **Phase 1 is complete** (the interactive web app: FastAPI/WebSocket backend, fixed-step sim loop, kinematic bicycle physics, procedural oval track, lap timing, trajectory recorder, centerline autopilot, and the Vite/Canvas frontend with manual-drive/watch/replay). **Phase 2 (real circuits + surfaces) is the active work** — see `.claude/specs/`. The RL training code (Phase 3+) is not yet written.
 
 ## Source of truth — read these first
 
@@ -12,6 +12,7 @@ Two documents in `.claude/` govern every engineering decision. Read them before 
 
 - **`.claude/PROJECT_VISION.md`** — the goal and the feel to aim for.
 - **`.claude/TECHNICAL_DESIGN.md`** — the **authoritative** engineering spec: stack, units, physics, env contract, reward design, repo layout (section 13), conventions (section 14), and the phased build order (section 15).
+- **`.claude/specs/`** — per-phase specs and implementation plans (e.g. `phase-2-realistic-tracks.md` + its `-plan.md`). The plan is the file-by-file build order for the phase in progress; read it alongside the design doc before touching that phase's code.
 
 If a change contradicts `TECHNICAL_DESIGN.md`, update the doc in the same change — the decision and the doc move together. Do not silently swap a library, change units, or restructure a contract.
 

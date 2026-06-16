@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from f1rl.track.geometry import arc_length, frames, signed_curvature
 from f1rl.track.schema import Track
 
 
@@ -24,7 +25,8 @@ class OvalParams:
     straight_length: float = 900.0  # length of each straight, m
     corner_radius: float = 180.0  # radius of each semicircular end, m
     half_width: float = 7.0  # half the asphalt width (total ~14 m), m
-    runoff_width: float = 12.0  # grass/gravel beyond each edge, m
+    kerb_width: float = 1.0  # red/white band past the asphalt edge, m
+    runoff_width: float = 12.0  # grass beyond the kerb, m (the oval has no gravel)
     spacing: float = 5.0  # target centerline sample spacing, m
 
     @classmethod
@@ -34,6 +36,7 @@ class OvalParams:
             straight_length=float(get("straight_length", cls.straight_length)),
             corner_radius=float(get("corner_radius", cls.corner_radius)),
             half_width=float(get("half_width", cls.half_width)),
+            kerb_width=float(get("kerb_width", cls.kerb_width)),
             runoff_width=float(get("runoff_width", cls.runoff_width)),
             spacing=float(get("spacing", cls.spacing)),
         )
@@ -81,30 +84,14 @@ def _stadium_points(p: OvalParams) -> np.ndarray:
 def _track_from_centerline(centerline: np.ndarray, p: OvalParams, name: str) -> Track:
     n = len(centerline)
 
-    # Cumulative arc length (chord-based) along the closed loop.
-    deltas = np.diff(centerline, axis=0, append=centerline[:1])
-    seg_len = np.hypot(deltas[:, 0], deltas[:, 1])
-    s = np.concatenate([[0.0], np.cumsum(seg_len[:-1])])
-
-    # Unit tangent via central differences with wraparound.
-    fwd = np.roll(centerline, -1, axis=0) - centerline
-    bwd = centerline - np.roll(centerline, 1, axis=0)
-    tangent = fwd + bwd
-    tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
-
-    # Left normal (rotate tangent +90deg).
-    normal = np.column_stack([-tangent[:, 1], tangent[:, 0]])
-
-    # Signed curvature = d(heading)/ds, central difference with wraparound. The
-    # denominator is the two-segment span around each sample (seam-safe via seg_len).
-    heading = np.arctan2(tangent[:, 1], tangent[:, 0])
-    dtheta = np.angle(np.exp(1j * (np.roll(heading, -1) - np.roll(heading, 1))))
-    ds_span = seg_len + np.roll(seg_len, 1)
-    curvature = dtheta / ds_span
+    s, seg_len = arc_length(centerline, closed=True)
+    tangent, normal = frames(centerline, closed=True)
+    curvature = signed_curvature(tangent, seg_len, closed=True)
 
     half = np.full(n, p.half_width)
-    runoff = np.full(n, p.runoff_width)
     gradient = np.zeros(n)
+    # Oval surface bands: a thin constant kerb, grass runoff, no gravel.
+    official = 2 * p.straight_length + 2 * np.pi * p.corner_radius
 
     return Track(
         name=name,
@@ -115,7 +102,12 @@ def _track_from_centerline(centerline: np.ndarray, p: OvalParams, name: str) -> 
         curvature=curvature.astype(float),
         half_width_left=half,
         half_width_right=half,
-        runoff_width=runoff,
+        kerb_width=np.full(n, p.kerb_width),
+        grass_width=np.full(n, p.runoff_width),
+        gravel_width=np.zeros(n),
         gradient=gradient,
         closed=True,
+        country="Proving Ground",
+        official_length_m=float(official),
+        source="procedural",
     )

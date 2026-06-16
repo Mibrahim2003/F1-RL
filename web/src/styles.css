@@ -662,3 +662,290 @@
 .hidden {
   display: none !important;
 }
+
+/* ============================================================
+   Phase 2 — track selector, surface config panel, badges
+   ============================================================ */
+
+#stage {
+  position: relative; /* anchor the selector overlay + config panel */
+}
+
+.circuit-chip {
+  cursor: pointer;
+}
+.circuit-chip.low-confidence .flag {
+  box-shadow: 0 0 0 2px var(--slower);
+}
+
+/* ---- track selector modal ---- */
+.selector-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  background: rgba(8, 8, 12, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(3px);
+}
+.selector-modal {
+  width: 1120px;
+  max-width: 92%;
+  max-height: 80%;
+  background: var(--panel);
+  border: 1px solid var(--hair-12);
+  border-radius: 10px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.selector-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--hair-10);
+}
+.selector-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 2px;
+  font-size: 15px;
+  color: var(--text);
+}
+.selector-search {
+  flex: 1;
+  background: var(--panel-2);
+  border: 1px solid var(--hair-12);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 13px;
+  padding: 9px 12px;
+  outline: none;
+}
+.selector-search:focus {
+  border-color: var(--red);
+}
+.selector-close {
+  background: transparent;
+  border: none;
+  color: var(--text-2);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+.selector-close:hover {
+  color: var(--text);
+}
+.selector-grid {
+  padding: 20px 22px;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.selector-empty {
+  grid-column: 1 / -1;
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: center;
+  padding: 30px;
+}
+.track-card {
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--hair-10);
+  border-radius: 8px;
+  padding: 13px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition:
+    border-color 0.12s,
+    background 0.12s;
+}
+.track-card:hover {
+  border-color: var(--red);
+  background: var(--raised);
+}
+.track-card.active {
+  border-color: var(--red);
+  box-shadow: inset 0 0 0 1px var(--red);
+}
+.tc-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tc-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  color: var(--text);
+}
+.tc-country {
+  font-size: 11px;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.tc-stats {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  margin-top: 2px;
+}
+.lc-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--slower);
+  color: #000;
+  font-weight: 800;
+  font-size: 11px;
+}
+
+/* ---- surface config panel ---- */
+.config-panel {
+  position: absolute;
+  top: 84px;
+  right: 22px;
+  z-index: 40;
+  width: 300px;
+  background: var(--panel);
+  border: 1px solid var(--hair-12);
+  border-radius: 10px;
+  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.55);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cfg-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cfg-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 2px;
+  font-size: 13px;
+  color: var(--text);
+}
+.cfg-track {
+  font-size: 11px;
+  color: var(--text-2);
+  letter-spacing: 1px;
+  flex: 1;
+}
+.cfg-lowconf {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: #000;
+  background: var(--slower);
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+.cfg-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cfg-field .cf-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text-2);
+  margin-bottom: 4px;
+}
+.cf-val {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.cfg-field input[type="range"] {
+  width: 100%;
+  accent-color: var(--red);
+}
+.cfg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cfg-label {
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text-2);
+}
+.cfg-seg {
+  display: flex;
+  border: 1px solid var(--hair-12);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.cfg-seg button {
+  background: var(--panel-2);
+  border: none;
+  color: var(--text-2);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.cfg-seg button.active {
+  background: var(--raised);
+  color: #fff;
+}
+.cfg-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--hair-10);
+  padding-top: 12px;
+}
+.cfg-status {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text-2);
+}
+.cfg-status[data-state="unsaved"] {
+  color: var(--slower);
+}
+.cfg-status[data-state="saved"] {
+  color: var(--pb);
+}
+.cfg-save {
+  background: var(--red);
+  border: none;
+  color: #fff;
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  font-size: 11px;
+  padding: 8px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cfg-save:disabled {
+  background: var(--raised);
+  color: var(--text-3);
+  cursor: default;
+}
