@@ -15,7 +15,7 @@ Early stage — design complete, build starting. See the planning docs:
 
 Each phase ends with something watchable in the app.
 
-1. **App & viewer** — Pygame top-down viewer, manual drive, replay (oval track, kinematic physics).
+1. **App & viewer** — web top-down viewer (Vite/TypeScript + Canvas, FastAPI/WebSocket backend), manual drive, replay (oval track, kinematic physics).
 2. **Tracks** — offline FastF1 pipeline to build every real 2026 circuit, plus an in-app surface/condition editor.
 3. **One car, one circuit** — observations + rewards + PPO, then dynamic physics with the grip pipeline; benchmark lap time vs. the real pole.
 4. **One car, many circuits** — a single track-agnostic policy across the whole calendar.
@@ -23,8 +23,28 @@ Each phase ends with something watchable in the app.
 6. **Racing for real** — nearby-car awareness, collisions, overtaking and defending.
 7. **Pit stops & polish** — pit strategy, team colors, showcase videos.
 
+## Running the Phase 1 app
+
+The interactive app has two halves — a Python backend and a web frontend.
+
+```bash
+# 1. Install Python deps (editable)
+.venv/Scripts/python.exe -m pip install -e ".[dev]"
+
+# 2. Launch the backend (FastAPI on uvicorn)
+#    The editable install puts f1rl on the path; otherwise set PYTHONPATH=src.
+.venv/Scripts/python.exe -m uvicorn f1rl.server.app:app
+
+# 3. In a second terminal, launch the web frontend (needs Node/npm)
+cd web
+npm install
+npm run dev
+```
+
+Then open the localhost URL that Vite prints. Drive the oval with the arrows or WASD (Up/W throttle, Down/S brake, Left-Right/A-D steer, R reset), watch live telemetry, record a run, and replay it.
+
 ## Stack
 
-Python 3.10+ · NumPy · Gymnasium / PettingZoo / SuperSuit · Stable-Baselines3 (PPO) · PyTorch · FastF1 · SciPy · Pygame · imageio · Weights & Biases · OmegaConf · Ruff · Pytest.
+Python 3.10+ · NumPy · Gymnasium / PettingZoo / SuperSuit · Stable-Baselines3 (PPO) · PyTorch · FastF1 · SciPy · FastAPI / uvicorn · Vite / TypeScript / Canvas 2D · Pygame + imageio (headless eval clips) · Weights & Biases · OmegaConf · Ruff · Pytest.
 
 > Develop locally with Claude Code, push to GitHub; training runs on Colab/Kaggle GPUs that clone this repo. See the [technical design](.claude/TECHNICAL_DESIGN.md) for the full rationale behind every choice.

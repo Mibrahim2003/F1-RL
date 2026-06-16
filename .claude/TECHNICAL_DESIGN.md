@@ -43,7 +43,9 @@ Non-goals, fixed:
 | Deep learning backend | PyTorch | Backend for Stable-Baselines3. |
 | Track data source | FastF1 | Real circuit position telemetry, used offline to build track geometry. |
 | Curve fitting | SciPy (splprep, splev) | Resample and smooth the centerline at uniform spacing. |
-| Rendering | Pygame | Fast 2D drawing, runs headless on the cloud through a dummy video driver. |
+| Interactive app frontend | Vite + TypeScript, HTML5 Canvas 2D | Recreates the approved broadcast-grade design as a web app; the Canvas viewport draws the top-down scene from Python track geometry in meters. No framework. |
+| Interactive app backend | FastAPI on uvicorn (WebSocket) | A local server streams car state at the control rate over a WebSocket and accepts manual-drive input; serves track geometry and recorded trajectories over HTTP. |
+| Offscreen eval-clip rendering | Pygame | Fast 2D drawing, runs headless on the cloud through a dummy video driver. Used only for the training eval clips, never for the interactive app. |
 | Video encoding | imageio with imageio-ffmpeg | Pip-installable, compiles frames to mp4 with no system ffmpeg needed. |
 | Experiment tracking | Weights and Biases | Logs to the cloud, so a session disconnect never loses your curves. |
 | Config | OmegaConf with YAML files | Typed config plus command-line overrides, no heavy app framework. |
@@ -257,12 +259,14 @@ Shared rules:
 
 The interactive application is the primary surface of the project and the first thing built (section 15, phase 1). You see every change here.
 
-- Built on Pygame, top-down, with a camera you pan and zoom and a HUD area.
-- Four modes: manual drive with keyboard control, configure to set track surfaces and conditions and save them to the `Track`, watch live to run a policy in real time, and replay to play back a recorded run.
+- A web app: a Vite + TypeScript frontend with an HTML5 Canvas 2D viewport, talking to a local FastAPI/uvicorn backend over a WebSocket. The backend runs the simulation loop and streams car state at the control rate (20 Hz); the frontend draws at its own frame rate, interpolating between the last two streamed states. The viewport has a camera you pan and zoom, plus a HUD (top bar, timing tower, telemetry bar) recreating the approved broadcast-style design.
+- Four modes, unchanged in spirit: manual drive with keyboard control (the browser sends input messages over the socket), configure to set track surfaces and conditions and save them to the `Track`, watch live to run a policy in real time, and replay to play back a recorded run.
 - Watch live works for any policy, trained or untrained, because running a policy forward is cheap. This is how you see a car drive without waiting on training.
-- Drawing: the asphalt as a filled polygon between the boundaries, the kerb bands, the grass or gravel background, and each car as an oriented rectangle colored by team. A debug overlay draws the centerline and the rangefinder beams.
+- Drawing: the Canvas draws the asphalt ribbon between the boundaries, the kerb bands, the grass or gravel background, and each car as an oriented shape colored by team, all from Python track geometry in meters through a meters→pixels camera transform. A debug overlay draws the centerline and the rangefinder beams.
 
-The heavy training loop draws nothing, for speed. Two paths keep full visibility. The evaluation callback runs offscreen on the cloud, with the SDL video driver set to dummy, renders one episode to an mp4 through imageio, and logs the clip. After training, the app loads a checkpoint and runs the agent live. The app stays your view into everything. Only the long training loop runs unseen.
+The heavy training loop draws nothing, for speed, and the web frontend is never in that hot path. Two paths keep full visibility. The evaluation callback runs offscreen on the cloud, with the SDL video driver set to dummy, renders one episode to an mp4 through Pygame and imageio, and logs the clip — this headless eval-clip path is unchanged by the web pivot. After training, the app loads a checkpoint and runs the agent live. The app stays your view into everything. Only the long training loop runs unseen.
+
+The recorded-trajectory JSON format (section 10's recorder output) is the shared interchange between the live sim, the replay viewer, and the cloud eval-clip renderer: all three consume the same frame stream, so a run recorded in any mode replays identically anywhere.
 
 ---
 
@@ -286,12 +290,24 @@ f1-rl/
   TECHNICAL_DESIGN.md
   pyproject.toml                # dependencies and tooling
   configs/
-    default.yaml
-    track/<circuit>.yaml
-    experiment/<name>.yaml
+    default.yaml             # seed, sim, physics, server, and track_id (selects the track file)
+    track/<circuit>.yaml     # per-circuit geometry, pole time, lap count; merged under cfg.track
+    experiment/<name>.yaml   # per-run overrides for the trainer; arrives in Phase 3 with train.py
   data/
     raw_telemetry/              # FastF1 cache, gitignored
     tracks/                     # processed Track files, .npz
+  recordings/                   # recorded-trajectory JSON, gitignored
+  web/                          # interactive app frontend (Vite + TypeScript)
+    index.html                  # the broadcast-style stage shell
+    src/
+      main.ts                   # bootstrap, stage scaling, UI state machine
+      tokens.css                # design tokens + fonts
+      net/socket.ts             # WebSocket client to /ws/sim
+      input/keyboard.ts         # arrows + WASD -> input messages
+      viewport/camera.ts        # meters<->pixels transform, pan/zoom/follow
+      viewport/renderer.ts      # Canvas 2D draw, interpolating 20 Hz states
+      hud/telemetry.ts          # tower + telemetry bar from state frames
+      replay/player.ts          # load + play/pause/scrub a trajectory
   src/f1rl/
     __init__.py
     physics/
@@ -301,19 +317,25 @@ f1-rl/
       tires.py                  # grip pipeline and tire model
     track/
       schema.py                 # Track dataclass
+      oval.py                   # procedural oval Track (Phase 1)
       build.py                  # FastF1 to processed Track, offline
       loader.py                 # load cached Track
+    sim/
+      loop.py                   # fixed-step simulation loop
+      timing.py                 # lap timing and delta-to-pole
+      recorder.py               # trajectory recording (JSON)
+      autopilot.py              # centerline pure-pursuit for watch-live
+    server/
+      app.py                    # FastAPI app: WS /ws/sim, GET /track, GET /recordings
+      messages.py               # Pydantic client/server message models
     env/
       single_agent.py           # RacingEnv
       multi_agent.py            # RacingParallelEnv
       observations.py
       rewards.py
       conditions.py             # weather and surface state
-      recorder.py               # trajectory recording
     render/
-      app.py                    # interactive viewer, manual drive, track config UI
-      renderer.py               # offscreen frames to mp4 for eval clips
-      manual_drive.py           # local keyboard control entry
+      renderer.py               # offscreen frames to mp4 for eval clips (training only)
     train/
       train.py
       evaluate.py
@@ -332,6 +354,8 @@ f1-rl/
     test_physics.py
     test_track_build.py
 ```
+
+The interactive app is split across the top-level `web/` frontend and two Python packages: `server/` (the FastAPI app and its message models) and `sim/` (the fixed-step loop, lap timing, the trajectory recorder, and the centerline autopilot for watch-live). The `recorder.py` lives under `sim/` because the recorded-trajectory JSON it produces is the shared interchange across live sim, replay, and eval clips. `render/renderer.py` stays under the package as the offscreen eval-clip renderer used by training only; it is never imported by the app or the training hot path.
 
 ---
 
@@ -354,7 +378,7 @@ f1-rl/
 
 This order is visibility-first. You see every change in the application as you make it. Earlier phases are dependencies for later ones.
 
-Phase 1, the application and viewer. Build the interactive 2D top-down app in Pygame, with a camera you pan and zoom, the track on screen, cars drawn as real-proportion shapes, and a HUD. Add a manual drive mode with keyboard control to feel the physics by hand. Add a replay mode that plays a recorded run. Use a hardcoded oval track and the kinematic physics for now. This app is the surface for every later feature. Artifact: drive a car around an oval in the app and replay a saved run.
+Phase 1, the application and viewer. Build the interactive 2D top-down app as a web app: a Vite + TypeScript frontend with an HTML5 Canvas 2D viewport in the approved broadcast-style UI, talking to a local FastAPI/uvicorn backend over a WebSocket. The Canvas draws the track from Python track geometry in meters through a meters→pixels camera you pan and zoom, with cars as real-proportion shapes and a HUD (top bar, timing tower, telemetry bar). Add a manual drive mode where the backend runs the sim loop and the browser sends keyboard input over the socket, to feel the physics by hand. Add a replay mode that plays a recorded-trajectory run. Use a procedurally generated oval track and the kinematic physics for now. This app is the surface for every later feature. Artifact: drive a car around an oval in the app and replay a saved run.
 
 Phase 2, tracks and the track configuration UI. Build the offline FastF1 pipeline and bring in every real 2026 circuit as a cached `Track`. Build the configuration screen inside the app: load a circuit, see the centerline and boundaries, and set the asphalt width, the kerbs, the grass, and the sand or gravel, plus dry or wet, then save back to the `Track`. Build the new Madrid circuit from a manual outline, since it has no telemetry. Artifact: every circuit loads in the app and you shape its surfaces by hand.
 

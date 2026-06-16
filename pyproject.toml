@@ -28,6 +28,11 @@ dependencies = [
     "imageio-ffmpeg>=0.5",
     "wandb>=0.17",
     "omegaconf>=2.3",
+    # Phase 1 app backend: local FastAPI/WebSocket engine that streams car state.
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "websockets>=12.0",
+    "pydantic>=2.6",
 ]
 
 [project.optional-dependencies]
@@ -67,3 +72,4 @@ known-first-party = ["f1rl"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["src"]

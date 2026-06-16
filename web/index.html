@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <title>F1-SIM</title>
+    <link rel="stylesheet" href="/src/tokens.css" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="stage">
+        <!-- ===================== TOP BAR ===================== -->
+        <div class="topbar">
+          <div class="wordmark">
+            <div class="chip"><span>F1</span></div>
+            <span class="sim">SIM</span>
+          </div>
+
+          <div class="topbar-center">
+            <div class="circuit-chip">
+              <div class="flag"></div>
+              <div class="meta">
+                <span class="name" id="circuit-name">OVAL</span>
+                <span class="locale" id="circuit-locale">PROVING GROUND</span>
+              </div>
+              <svg width="11" height="11" viewBox="0 0 12 12" style="margin-left: 4px">
+                <path d="M2 4 L6 8 L10 4" stroke="#9A9AA5" stroke-width="1.4" fill="none" />
+              </svg>
+            </div>
+          </div>
+
+          <div class="topbar-right">
+            <div class="live-pill" id="live-pill">
+              <span class="dot" id="live-dot"></span>
+              <span class="label" id="live-label">LIVE</span>
+            </div>
+            <span class="clock" id="clock">0:00:00</span>
+          </div>
+        </div>
+
+        <!-- ===================== MIDDLE ===================== -->
+        <div class="middle">
+          <!-- TIMING TOWER -->
+          <div class="tower">
+            <div class="tower-head">
+              <span class="h-pos">POS</span>
+              <span class="h-driver">DRIVER</span>
+              <span>INTERVAL</span>
+            </div>
+            <div class="tower-body" id="tower-body">
+              <!-- rows rendered by TS (data-driven; 1 row in Phase 1) -->
+            </div>
+          </div>
+
+          <!-- VIEWPORT -->
+          <div class="viewport" id="viewport">
+            <canvas id="track-canvas"></canvas>
+
+            <div class="sector-strip">
+              <span class="session" id="session-label">RACE 1</span>
+              <span class="sep"></span>
+              <div class="sector"><span>S1</span><span class="bar"></span></div>
+              <div class="sector"><span>S2</span><span class="bar"></span></div>
+              <div class="sector"><span>S3</span><span class="bar"></span></div>
+            </div>
+
+            <div class="mode-badge hidden" id="mode-badge"><span id="mode-badge-text">WATCH</span></div>
+
+            <div class="manual-overlay hidden" id="manual-overlay">
+              <div class="row"><span class="key">W</span></div>
+              <div class="row">
+                <span class="key">A</span><span class="key">S</span><span class="key">D</span>
+              </div>
+              <span class="hint">MANUAL DRIVE — STEER WITH KEYS</span>
+            </div>
+
+            <div class="replay-scrub hidden" id="replay-scrub">
+              <div class="fill" id="replay-fill"></div>
+            </div>
+
+            <div class="banner hidden" id="banner">
+              <span class="title" id="banner-title">ENGINE OFFLINE</span>
+              <span class="sub" id="banner-sub"
+                >The simulation engine is not reachable. Start the backend, or use Replay mode to
+                review a recorded run.</span
+              >
+            </div>
+
+            <div class="debug" id="debug"></div>
+            <div class="vignette"></div>
+          </div>
+        </div>
+
+        <!-- ===================== BOTTOM BAR ===================== -->
+        <div class="bottombar">
+          <div class="driver-chip">
+            <div class="bar" id="driver-bar"></div>
+            <div class="col">
+              <span class="car" id="driver-num">CAR 01</span>
+              <span class="name" id="driver-code">SIM</span>
+              <span class="pos" id="driver-pos">P1</span>
+            </div>
+          </div>
+
+          <div class="stat flex">
+            <span class="label">SPEED</span>
+            <div class="baseline">
+              <span class="big" id="speed">000</span><span class="unit">KM/H</span>
+            </div>
+          </div>
+
+          <div class="stat gear">
+            <span class="label">GEAR</span>
+            <span class="g" id="gear">—</span>
+          </div>
+
+          <div class="stat flex">
+            <span class="label">LAP TIME</span>
+            <span class="num" id="lap-time">-:--.---</span>
+            <span class="sub">LAST <span id="last-lap">-:--.---</span></span>
+          </div>
+
+          <div class="stat flex">
+            <span class="label">DELTA TO POLE</span>
+            <span class="num" id="delta">+0.000</span>
+            <span class="sub">POLE <span id="pole-str">-:--.---</span></span>
+          </div>
+
+          <div class="stat lap-tyre">
+            <div class="col" style="gap: 3px">
+              <span class="label">LAP</span>
+              <span class="lap"><span id="lap">1</span><span class="total"> / <span id="lap-total">1</span></span></span>
+            </div>
+            <div class="tyre-row">
+              <span class="tyre-dot">S</span>
+              <span class="tyre-age">— LAPS</span>
+            </div>
+          </div>
+
+          <div class="controls">
+            <div class="playback">
+              <div class="btn btn-restart" id="btn-restart" title="Restart">
+                <svg width="16" height="16" viewBox="0 0 16 16">
+                  <path d="M8 2 A6 6 0 1 1 2 8" stroke="#F2F2F7" stroke-width="1.6" fill="none" />
+                  <path d="M2 8 L2 4 L5.5 6 Z" fill="#F2F2F7" />
+                </svg>
+              </div>
+              <div class="btn btn-run" id="btn-run" title="Play / Pause">
+                <!-- pause/play glyph swapped by TS -->
+                <svg id="run-glyph" width="14" height="14" viewBox="0 0 14 14">
+                  <rect x="3" y="2.5" width="3" height="9" fill="#E10600" />
+                  <rect x="8" y="2.5" width="3" height="9" fill="#E10600" />
+                </svg>
+              </div>
+            </div>
+
+            <div class="seg-group">
+              <span class="cap">SPEED</span>
+              <div class="seg speed" id="speed-seg">
+                <div class="item active" data-speed="1">1x</div>
+                <div class="item" data-speed="2">2x</div>
+                <div class="item" data-speed="4">4x</div>
+              </div>
+            </div>
+
+            <div class="seg-group">
+              <span class="cap">MODE</span>
+              <div class="seg mode" id="mode-seg">
+                <div class="item" data-mode="manual">MANUAL</div>
+                <div class="item active" data-mode="watch">WATCH</div>
+                <div class="item" data-mode="replay">REPLAY</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
