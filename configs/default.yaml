@@ -12,6 +12,7 @@ sim:
   grip: 1.0               # constant grip for the kinematic model
 
 physics:
+  model: kinematic        # "kinematic" (Phase 1) | "dynamic" (Part 2, reserved); read by make_physics
   wheelbase: 3.6          # m
   mass: 798.0             # kg
   max_steer_deg: 18.0     # steering angle at the wheels, degrees
@@ -25,3 +26,37 @@ server:
   port: 8000
   recordings_dir: "recordings"
   tracks_dir: "data/tracks"   # cached real-circuit .npz files (built offline)
+  checkpoints_dir: "runs"     # root scanned for trained checkpoints (watch-live policy picker)
+
+# --- Phase 3a (training core) ---------------------------------------------------------
+# ObservationV1 (OBS_VERSION = 1, length 15): all parameters tunable, SI units.
+obs:
+  ref_speed: 92.0                 # m/s, normalizes speed (vx / ref_speed); ~kinematic top speed
+  lookahead_m: [10, 25, 50, 100, 150]            # 5 curvature-lookahead distances (m)
+  beam_angles_deg: [-90, -60, -30, 0, 30, 60, 90]  # 7 rangefinder beams, relative to yaw
+  beam_max: 60.0                  # m, beam range; distances normalize by this, clip [0,1]
+  curvature_scale: 50.0           # multiplies signed curvature (1/m) into a bounded range
+
+# RewardV1 — progress-based, never rewards centerline proximity. Most-iterated weights.
+reward:
+  w_progress: 1.0                 # per meter of forward arc-length progress
+  w_offtrack: 1.0                 # scales the graded off-track penalty
+  w_step: 0.05                    # small per-step cost, discourages dawdling
+  w_reverse: 2.0                  # extra penalty per meter of backward progress
+  offtrack_soft_m: 2.0            # meters past the edge over which the penalty ramps up
+  offtrack_exp: 2.0               # >1: cheap small excursions, costly deep ones
+
+# Env limits / termination + VecNormalize knobs.
+env:
+  target_laps: 1                  # success on completing this many laps (per-track override possible)
+  max_steps: 4000                 # truncation step limit (~200 s at 20 Hz)
+  offtrack_limit_m: 12.0          # meters past the asphalt edge -> failure termination
+  wrong_way_steps: 40             # consecutive backward-progress steps -> wrong-way failure
+  wrong_way_ds_m: -0.05           # ds (m) below this counts as going backward
+  start_speed: 0.0                # m/s at reset
+  start_randomize: true           # random centerline start index (start-state randomization)
+  failure_reward: -10.0           # one-off penalty added on a failure termination
+  norm_reward: true               # VecNormalize reward normalization
+  clip_obs: 10.0                  # VecNormalize obs clip
+  clip_reward: 10.0               # VecNormalize reward clip
+  norm_gamma: 0.99                # VecNormalize discount (match PPO gamma)

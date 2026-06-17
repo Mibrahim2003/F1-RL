@@ -1,10 +1,11 @@
 """Inbound client -> server WebSocket messages (Pydantic v2).
 
-The browser sends five message kinds — ``input``, ``mode``, ``control``, ``record``,
-``track`` — all discriminated on a ``type`` field. :func:`parse_client_message` dispatches on
-that field and returns ``None`` for anything unknown or malformed, so the socket loop never
-raises on bad input. Outbound ``state`` frames are produced by :class:`f1rl.sim.loop.SimLoop`
-and are not modeled here. ``SurfaceEdit`` models the ``POST /track/{id}/surfaces`` HTTP body.
+The browser sends six message kinds — ``input``, ``mode``, ``control``, ``record``,
+``track``, ``policy`` — all discriminated on a ``type`` field. :func:`parse_client_message`
+dispatches on that field and returns ``None`` for anything unknown or malformed, so the socket
+loop never raises on bad input. Outbound ``state`` frames are produced by
+:class:`f1rl.sim.loop.SimLoop` and are not modeled here. ``SurfaceEdit`` models the
+``POST /track/{id}/surfaces`` HTTP body.
 """
 
 from __future__ import annotations
@@ -79,6 +80,20 @@ class TrackMessage(BaseModel):
     id: str
 
 
+class PolicyMessage(BaseModel):
+    """Select what drives the car in watch mode (Phase 3a live-policy view).
+
+    ``source == "autopilot"`` restores the centerline pure-pursuit follower; ``source ==
+    "checkpoint"`` loads the trained checkpoint named by ``id`` (a directory under the
+    server's checkpoints root). A bad/missing checkpoint never crashes the socket — the
+    server replies with a ``policy_error`` event and stays on the autopilot.
+    """
+
+    type: Literal["policy"] = "policy"
+    source: Literal["autopilot", "checkpoint"]
+    id: str | None = None
+
+
 class SurfaceEdit(BaseModel):
     """Edited surface band widths for ``POST /track/{id}/surfaces`` (uniform, meters).
 
@@ -109,7 +124,9 @@ class SurfaceEdit(BaseModel):
         return v
 
 
-ClientMessage = InputMessage | ModeMessage | ControlMessage | RecordMessage | TrackMessage
+ClientMessage = (
+    InputMessage | ModeMessage | ControlMessage | RecordMessage | TrackMessage | PolicyMessage
+)
 
 _PARSERS: dict[str, type[BaseModel]] = {
     "input": InputMessage,
@@ -117,6 +134,7 @@ _PARSERS: dict[str, type[BaseModel]] = {
     "control": ControlMessage,
     "record": RecordMessage,
     "track": TrackMessage,
+    "policy": PolicyMessage,
 }
 
 
