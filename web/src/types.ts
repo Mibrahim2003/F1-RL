@@ -80,6 +80,11 @@ export interface Telemetry {
   best_lap: number;
   last_lap: number;
   progress: number;
+  // Phase 3b grip-pipeline readouts (optional: kinematic frames omit them).
+  compound?: "soft" | "medium" | "hard" | "intermediate" | "wet";
+  tire_wear?: number; // 0..1
+  grip?: number; // effective grip scalar at the car
+  weather?: "dry" | "damp" | "wet";
 }
 
 export interface StateFrame {
@@ -103,6 +108,8 @@ export interface EventMessage {
   circuit_id?: string;
   total_timesteps?: number;
   message?: string;
+  // weather_changed (Phase 3b live grip).
+  condition?: "dry" | "damp" | "wet";
 }
 
 export type ServerMessage = StateFrame | EventMessage;
@@ -143,6 +150,12 @@ export interface ControlMessage {
   speed?: 1 | 2 | 4;
 }
 
+/** Set the live weather (Phase 3b grip pipeline); changes grip immediately. */
+export interface WeatherMessage {
+  type: "weather";
+  condition: "dry" | "damp" | "wet";
+}
+
 export interface RecordMessage {
   type: "record";
   action: "start" | "stop";
@@ -154,7 +167,8 @@ export type ClientMessage =
   | ControlMessage
   | RecordMessage
   | TrackMessage
-  | PolicyMessage;
+  | PolicyMessage
+  | WeatherMessage;
 
 /** Catalog entry from GET /api/checkpoints (the watch-live policy picker source). */
 export interface CheckpointSummary {

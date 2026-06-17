@@ -6,6 +6,7 @@ model swapped in later behind the same contract.
 """
 
 from f1rl.physics.base import CarState, PhysicsModel
+from f1rl.physics.dynamic import DynamicBicycle, DynamicParams
 from f1rl.physics.factory import make_physics
 from f1rl.physics.kinematic import KinematicBicycle, KinematicParams
 
@@ -14,5 +15,7 @@ __all__ = [
     "PhysicsModel",
     "KinematicBicycle",
     "KinematicParams",
+    "DynamicBicycle",
+    "DynamicParams",
     "make_physics",
 ]

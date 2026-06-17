@@ -1,0 +1,160 @@
+# rbr_dynamic — Phase 3b training run: one PPO policy learns red_bull_ring on the DYNAMIC
+# physics (friction circle + grip pipeline), ObservationV2 (length 22), reward_v2, under a
+# conditions curriculum, benchmarked against the real pole (64.3 s).
+#
+# This file IS the source of truth for the run: every hyperparameter, physics constant, grip
+# table, reward weight, obs parameter, env limit, curriculum stage, and cadence lives here —
+# never in logic (CLAUDE.md rule). Start from rbr_ppo.yaml; the physics/tires/weather/surface/
+# curriculum blocks and reward.version=2 are the Phase-3b additions. The dynamic levers
+# (downforce_coeff, mu_base, max_engine_force) are set from `python -m f1rl.train.calibrate`
+# so a clean optimal lap lands near the pole. SI units throughout.
+
+seed: 42
+
+track_id: red_bull_ring   # selects configs/track/red_bull_ring.yaml, merged under cfg.track
+
+# --- training device + parallelism ----------------------------------------------------
+device: cpu               # installed torch is CPU-only (4 cores); identical local & cloud
+n_envs: 4                 # SubprocVecEnv workers; ~core count (see SPS benchmark)
+total_timesteps: 2400000  # headline budget (curriculum spans 4 stages); smoke runs override
+
+# --- PPO hyperparameters (Stable-Baselines3 MlpPolicy) --------------------------------
+ppo:
+  n_steps: 2048
+  batch_size: 256
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  ent_coef: 0.0
+  vf_coef: 0.5
+  learning_rate: 0.0003
+  clip_range: 0.2
+  max_grad_norm: 0.5
+
+# --- sim loop timing ------------------------------------------------------------------
+sim:
+  control_hz: 20
+  substeps: 5
+  dt_physics: 0.01
+  grip: 1.0               # fallback only; the dynamic path uses the grip pipeline
+
+# --- physics: DYNAMIC bicycle + friction circle (Part 2) ------------------------------
+physics:
+  model: dynamic
+  wheelbase: 3.6
+  mass: 798.0
+  max_steer_deg: 18.0
+  max_engine_force: 14500.0    # calibrated lever (accel/top speed)
+  max_brake_force: 29000.0     # calibrated lever (braking deceleration)
+  drag_coeff: 0.70
+  rolling_coeff: 0.015
+  yaw_inertia: 1200.0
+  cg_front_ratio: 0.54
+  cornering_stiffness_front: 180000.0
+  cornering_stiffness_rear: 200000.0
+  downforce_coeff: 6.5         # calibrated lever (high-speed cornering grip)
+  wear_rate: 0.0               # curriculum ramps this; base run starts wear-free
+  wear_slip_ref: 1.0
+  v_blend: 3.0
+  v_eps: 0.5
+
+# --- grip pipeline: tires / weather / surface -----------------------------------------
+tires:
+  # calibrated: clean optimal lap estimate = 64.88 s vs pole 64.3 s (delta +0.58)
+  # via `python -m f1rl.train.calibrate` (downforce_coeff 6.5, engine 14500, brake 29000)
+  mu_base: 1.95                # calibrated lever (overall grip level)
+  compound_grip: [1.00, 0.97, 0.94, 0.88, 0.82]
+  compound_wear_falloff: [0.30, 0.22, 0.16, 0.20, 0.20]
+  start_compound: 0
+
+weather:
+  condition: dry
+  dry_factor: 1.0
+  damp_factor: 0.8
+  wet_factor: 0.6
+  p_wet: 0.25                  # used when a curriculum stage sets weather: sampled
+
+surface:
+  asphalt: 1.0
+  kerb: 0.9
+  grass: 0.4
+  gravel: 0.3
+
+# --- conditions curriculum: easy grip -> nominal -> wear -> weather --------------------
+curriculum:
+  enabled: true
+  stages:
+    - start_step: 0            # learn the racing line on easy (high) grip
+      mu_base: 2.30
+      wear_rate: 0.0
+      weather: dry
+    - start_step: 600000       # nominal (calibrated) grip, dry, no wear
+      mu_base: 1.95
+      wear_rate: 0.0
+      weather: dry
+    - start_step: 1200000      # introduce tire wear
+      mu_base: 1.95
+      wear_rate: 0.02
+      weather: dry
+    - start_step: 1800000      # introduce weather (sample wet episodes)
+      mu_base: 1.95
+      wear_rate: 0.02
+      weather: sampled
+
+# --- ObservationV2 (OBS_VERSION = 2, length 22) — all tunable, SI units ----------------
+obs:
+  ref_speed: 92.0
+  lookahead_m: [10, 25, 50, 100, 150]
+  beam_angles_deg: [-90, -60, -30, 0, 30, 60, 90]
+  beam_max: 60.0
+  curvature_scale: 50.0
+
+# --- RewardV2 — progress core + optional slip shaping; never centerline -----------------
+reward:
+  version: 2
+  w_progress: 1.0
+  w_offtrack: 1.0
+  w_step: 0.05
+  w_reverse: 2.0
+  offtrack_soft_m: 2.0
+  offtrack_exp: 2.0
+  w_slip: 0.0                  # opt-in slip/spin penalty; 0 keeps behavior ~v1 (reshape later)
+  slip_threshold: 0.20
+
+# --- env limits / termination + VecNormalize knobs -------------------------------------
+env:
+  target_laps: 1
+  max_steps: 4000
+  offtrack_limit_m: 12.0
+  wrong_way_steps: 40
+  wrong_way_ds_m: -0.05
+  start_speed: 0.0
+  start_randomize: true
+  failure_reward: -10.0
+  norm_reward: true
+  clip_obs: 10.0
+  clip_reward: 10.0
+  norm_gamma: 0.99
+
+# --- eval / checkpoint cadence (in training steps) -------------------------------------
+eval:
+  eval_freq: 50000
+  n_eval_episodes: 1
+  deterministic: true
+  pole_time_s: 64.3
+  video_fps: 20
+  record_video: true
+
+checkpoint:
+  checkpoint_freq: 50000
+  keep_last_k: 3
+  keep_best: true
+  dir: checkpoints
+
+# --- Weights & Biases logging ----------------------------------------------------------
+wandb:
+  project: f1rl-phase3b
+  entity: null
+  mode: online
+  group: rbr_dynamic
+  tags: [phase-3b, red_bull_ring, dynamic, ppo]

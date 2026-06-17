@@ -46,3 +46,13 @@ def cfg():
         overrides=[f"track_id={TEST_TRACK_ID}"],
         config_root=CONFIG_ROOT,
     )
+
+
+@pytest.fixture
+def dyn_cfg():
+    """The Phase-3b dynamic-physics experiment config (dynamic model, obs v2, reward v2).
+
+    Loaded from the real ``configs/experiment/rbr_dynamic.yaml`` so the dynamic physics,
+    grip pipeline, curriculum, and reward weights all come from config.
+    """
+    return load_config("experiment/rbr_dynamic", config_root=CONFIG_ROOT)

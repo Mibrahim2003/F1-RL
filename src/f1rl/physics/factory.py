@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from f1rl.physics.base import PhysicsModel
+from f1rl.physics.dynamic import DynamicBicycle, DynamicParams
 from f1rl.physics.kinematic import KinematicBicycle, KinematicParams
 
 
@@ -21,19 +22,18 @@ def make_physics(cfg: Any) -> PhysicsModel:
 
     - ``"kinematic"`` (Phase 1, default) → :class:`KinematicBicycle` built from
       :meth:`KinematicParams.from_config`.
-    - ``"dynamic"`` → reserved for Part 2 (friction-circle dynamic model); raises
-      :class:`NotImplementedError` until that model lands.
+    - ``"dynamic"`` (Part 2) → :class:`DynamicBicycle` (friction-circle dynamic model) built
+      from :meth:`DynamicParams.from_config`.
 
     Args:
         cfg: Root config node (mapping or OmegaConf) carrying a ``physics`` block.
             ``physics.model`` selects the model; the remaining ``physics`` keys are the
-            tunable SI constants read by ``KinematicParams.from_config``.
+            tunable SI constants read by the selected model's ``from_config``.
 
     Returns:
         A :class:`~f1rl.physics.base.PhysicsModel` instance.
 
     Raises:
-        NotImplementedError: when ``physics.model == "dynamic"`` (Part 2).
         ValueError: when ``physics.model`` is unrecognized.
     """
     physics_cfg = cfg.physics
@@ -42,10 +42,7 @@ def make_physics(cfg: Any) -> PhysicsModel:
     if model == "kinematic":
         return KinematicBicycle(KinematicParams.from_config(physics_cfg))
     if model == "dynamic":
-        raise NotImplementedError(
-            "physics.model='dynamic' (friction-circle dynamic model) is reserved for "
-            "Part 2 and not yet implemented; use 'kinematic'."
-        )
+        return DynamicBicycle(DynamicParams.from_config(physics_cfg))
     raise ValueError(f"unknown physics.model {model!r}; expected 'kinematic' or 'dynamic'.")
 
 

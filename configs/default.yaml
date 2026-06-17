@@ -12,7 +12,7 @@ sim:
   grip: 1.0               # constant grip for the kinematic model
 
 physics:
-  model: kinematic        # "kinematic" (Phase 1) | "dynamic" (Part 2, reserved); read by make_physics
+  model: kinematic        # "kinematic" (Phase 1) | "dynamic" (Part 2); read by make_physics
   wheelbase: 3.6          # m
   mass: 798.0             # kg
   max_steer_deg: 18.0     # steering angle at the wheels, degrees
@@ -20,6 +20,16 @@ physics:
   max_brake_force: 16000.0    # N
   drag_coeff: 0.70        # N / (m/s)^2  (lumped 0.5 * rho * Cd * A)
   rolling_coeff: 0.015    # dimensionless; rolling resistance = c * m * g
+  # --- dynamic-model-only keys (Part 2; read only when model == "dynamic") ---
+  yaw_inertia: 1200.0         # Iz, kg m^2
+  cg_front_ratio: 0.54        # lf / wheelbase; lr = (1 - ratio) * wheelbase
+  cornering_stiffness_front: 180000.0  # Cf, N/rad
+  cornering_stiffness_rear: 200000.0   # Cr, N/rad
+  downforce_coeff: 4.0        # N / (m/s)^2 (0.5*rho*Cl*A); adds to friction-circle max_force
+  wear_rate: 0.0              # tire wear per (slip*speed*dt); 0 disables (early curriculum)
+  wear_slip_ref: 1.0          # divides the slip*speed wear load (shapes wear growth)
+  v_blend: 3.0                # m/s; below this blend yaw_rate/vy toward the kinematic prediction
+  v_eps: 0.5                  # m/s; slip-angle singularity guard (vx_safe = max(vx, v_eps))
 
 server:
   host: "127.0.0.1"
@@ -39,12 +49,15 @@ obs:
 
 # RewardV1 — progress-based, never rewards centerline proximity. Most-iterated weights.
 reward:
+  version: 1                      # 1 = reward_v1 (Phase 1) | 2 = reward_v2 (Part 2 shaping)
   w_progress: 1.0                 # per meter of forward arc-length progress
   w_offtrack: 1.0                 # scales the graded off-track penalty
   w_step: 0.05                    # small per-step cost, discourages dawdling
   w_reverse: 2.0                  # extra penalty per meter of backward progress
   offtrack_soft_m: 2.0            # meters past the edge over which the penalty ramps up
   offtrack_exp: 2.0               # >1: cheap small excursions, costly deep ones
+  w_slip: 0.0                     # v2 only: penalty on excessive slip/spin; 0 keeps behavior ~v1
+  slip_threshold: 0.20            # v2 only: |vy/vx| above this is penalized (rad-ish)
 
 # Env limits / termination + VecNormalize knobs.
 env:
@@ -60,3 +73,35 @@ env:
   clip_obs: 10.0                  # VecNormalize obs clip
   clip_reward: 10.0               # VecNormalize reward clip
   norm_gamma: 0.99                # VecNormalize discount (match PPO gamma)
+
+# --- Phase 3b (realistic physics): grip pipeline -------------------------------------
+# effective_grip = mu_base * tire(compound, wear) * weather * surface — one scalar gating
+# the friction circle. Pure tables (physics/tires.py); the env owns the surface lookup.
+tires:
+  mu_base: 1.05                   # base friction coefficient (clean dry asphalt, fresh soft)
+  # per-compound index order matches CarState.compound: 0 soft 1 medium 2 hard 3 inter 4 wet
+  compound_grip: [1.00, 0.97, 0.94, 0.88, 0.82]   # soft > medium > hard; inter/wet lower (dry)
+  compound_wear_falloff: [0.30, 0.22, 0.16, 0.20, 0.20]  # grip *= (1 - falloff * wear)
+  start_compound: 0               # compound set at reset (0 soft)
+
+weather:
+  condition: dry                  # dry | damp | wet — live default / episode condition
+  dry_factor: 1.0
+  damp_factor: 0.8
+  wet_factor: 0.6
+  p_wet: 0.0                      # P(episode samples wet) when curriculum stage weather = sampled
+
+surface:                          # grip multiplier per surface zone (Phase 2 bands)
+  asphalt: 1.0
+  kerb: 0.9
+  grass: 0.4
+  gravel: 0.3
+
+# --- Phase 3b curriculum: ramp conditions by timestep (CurriculumCallback) -------------
+curriculum:
+  enabled: false                  # default off; rbr_dynamic.yaml turns it on
+  stages:
+    - start_step: 0
+      mu_base: 1.30
+      wear_rate: 0.0
+      weather: dry

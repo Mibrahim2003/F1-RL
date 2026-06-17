@@ -43,6 +43,9 @@ class EpisodeMetrics:
     # vs-pole flags (pole + 2x pole), set when a lap completes.
     beat_pole: bool = False
     beat_2x_pole: bool = False
+    # Signed gap to the real pole (best_lap - pole); positive = slower. None if no lap / no pole.
+    lap_delta_to_pole: float | None = None
+    pole_missing: bool = False  # True when the track has no published pole (pole <= 0)
 
     def as_dict(self) -> dict[str, Any]:
         nan = float("nan")
@@ -59,6 +62,10 @@ class EpisodeMetrics:
             ),
             "eval/beat_pole": float(self.beat_pole),
             "eval/beat_2x_pole": float(self.beat_2x_pole),
+            "eval/lap_delta_to_pole": (
+                self.lap_delta_to_pole if self.lap_delta_to_pole is not None else nan
+            ),
+            "eval/pole_missing": float(self.pole_missing),
         }
 
 
@@ -83,6 +90,10 @@ class EvalResult:
             for e in self.episodes
             if e.steps_to_first_clean_lap is not None
         ]
+        pole_missing = pole_time_s <= 0.0
+        # gap_to_pole = best achieved lap minus pole (positive = slower). Skipped when the
+        # track has no published pole, or when no lap completed this eval.
+        gap = float(np.min(best) - pole_time_s) if (best and not pole_missing) else float("nan")
         return {
             "eval/mean_return": self.mean_return,
             "eval/mean_episode_length": float(np.mean([e.episode_length for e in self.episodes])),
@@ -94,6 +105,8 @@ class EvalResult:
             "eval/two_x_pole_time_s": float(2.0 * pole_time_s),
             "eval/beat_pole_rate": float(np.mean([e.beat_pole for e in self.episodes])),
             "eval/beat_2x_pole_rate": float(np.mean([e.beat_2x_pole for e in self.episodes])),
+            "eval/gap_to_pole": gap,
+            "eval/pole_missing": float(pole_missing),
         }
 
 
@@ -164,9 +177,12 @@ def run_episode(
         ):
             metrics.steps_to_first_clean_lap = metrics.episode_length
 
+    # Missing pole (<= 0): flag it and skip the delta — never divide/compare against zero.
+    metrics.pole_missing = pole_time_s <= 0.0
     if metrics.best_lap_time is not None and pole_time_s > 0.0:
         metrics.beat_pole = metrics.best_lap_time <= pole_time_s
         metrics.beat_2x_pole = metrics.best_lap_time <= 2.0 * pole_time_s
+        metrics.lap_delta_to_pole = float(metrics.best_lap_time) - float(pole_time_s)
     return metrics, recorder
 
 

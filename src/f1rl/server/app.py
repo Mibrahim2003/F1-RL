@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +26,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from omegaconf import DictConfig
 
-from f1rl.physics.kinematic import KinematicBicycle, KinematicParams
+from f1rl.env.conditions import Conditions
+from f1rl.physics import make_physics
 from f1rl.server.messages import (
     ControlMessage,
     InputMessage,
@@ -34,6 +36,7 @@ from f1rl.server.messages import (
     RecordMessage,
     SurfaceEdit,
     TrackMessage,
+    WeatherMessage,
     parse_client_message,
 )
 from f1rl.sim.autopilot import CenterlineAutopilot
@@ -124,8 +127,11 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
     if cfg is None:
         cfg = load_config("default")
 
-    params = KinematicParams.from_config(cfg.physics)
-    physics = KinematicBicycle(params)
+    # Build physics through the factory so physics.model: dynamic drives the live car too
+    # (no direct KinematicBicycle). Conditions is the shared grip provider the env also uses.
+    physics = make_physics(cfg)
+    max_steer = math.radians(float(cfg.physics.get("max_steer_deg", 18.0)))
+    use_pipeline = str(cfg.physics.get("model", "kinematic")) == "dynamic"
     sim_cfg = SimConfig.from_config(cfg.sim)
     default_track_id = str(cfg.track_id)
     recordings_dir = Path(cfg.server.recordings_dir)
@@ -234,10 +240,12 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
         def set_track(track_id: str) -> None:
             tk, pole, laps = track_meta(track_id)
             sim.track = tk
-            sim.loop = SimLoop(physics, tk, sim_cfg, pole, laps)
+            # A fresh grip provider per circuit (dry, fresh tires); shared with the env's logic.
+            conditions = Conditions.from_config(cfg) if use_pipeline else None
+            sim.loop = SimLoop(physics, tk, sim_cfg, pole, laps, conditions)
             # Switching circuits drops any active policy back to the centerline autopilot:
             # a checkpoint may have been trained on a different circuit (re-pick to re-apply).
-            sim.autopilot = CenterlineAutopilot(tk, params.max_steer)
+            sim.autopilot = CenterlineAutopilot(tk, max_steer)
             sim.policy_id = None
             sim.track_id = track_id
             sim.pole_time_s = pole
@@ -250,7 +258,7 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
             sends a ``policy_error`` event and leaves the centerline autopilot in place.
             """
             if msg.source == "autopilot":
-                sim.autopilot = CenterlineAutopilot(sim.track, params.max_steer)
+                sim.autopilot = CenterlineAutopilot(sim.track, max_steer)
                 sim.policy_id = None
                 await ws.send_json(
                     {"type": "event", "event": "policy_changed", "source": "autopilot"}
@@ -263,7 +271,7 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                 pilot = PolicyPilot(ckpt_path, sim.track, cfg)
             except Exception as exc:  # CheckpointError, FileNotFoundError, load failure
                 # Never crash the socket: report the error and stay on the autopilot.
-                sim.autopilot = CenterlineAutopilot(sim.track, params.max_steer)
+                sim.autopilot = CenterlineAutopilot(sim.track, max_steer)
                 sim.policy_id = None
                 await ws.send_json(
                     {
@@ -338,6 +346,11 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                         await ws.send_json({"type": "event", "event": "track_error", "id": msg.id})
                 elif isinstance(msg, PolicyMessage):
                     await apply_policy(msg)
+                elif isinstance(msg, WeatherMessage):
+                    sim.loop.set_weather(msg.condition)
+                    await ws.send_json(
+                        {"type": "event", "event": "weather_changed", "condition": msg.condition}
+                    )
                 elif isinstance(msg, ControlMessage):
                     if msg.action == "play":
                         session.running = True

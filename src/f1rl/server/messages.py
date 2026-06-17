@@ -94,12 +94,25 @@ class PolicyMessage(BaseModel):
     id: str | None = None
 
 
+class WeatherMessage(BaseModel):
+    """Set the live weather for the watch session (Phase 3b grip pipeline).
+
+    Changes the grip immediately via the shared :class:`~f1rl.env.conditions.Conditions`
+    provider on the session's :class:`~f1rl.sim.loop.SimLoop`, so the car loses grip in the
+    wet — the same factor the training env uses.
+    """
+
+    type: Literal["weather"] = "weather"
+    condition: Literal["dry", "damp", "wet"]
+
+
 class SurfaceEdit(BaseModel):
     """Edited surface band widths for ``POST /track/{id}/surfaces`` (uniform, meters).
 
     All bands are optional; only the provided ones are applied. Values are bound-checked so a
-    bad slider value can never write a degenerate track. ``condition`` (dry/wet) is accepted
-    for forward-compatibility with the Phase 3 grip model but is a no-op in Phase 2.
+    bad slider value can never write a degenerate track. ``condition`` (dry/wet) selects the
+    grip-pipeline weather for the live session (Phase 3b); the saved band widths feed the
+    surface-zone classifier.
     """
 
     half_width_left: float | None = None
@@ -125,7 +138,13 @@ class SurfaceEdit(BaseModel):
 
 
 ClientMessage = (
-    InputMessage | ModeMessage | ControlMessage | RecordMessage | TrackMessage | PolicyMessage
+    InputMessage
+    | ModeMessage
+    | ControlMessage
+    | RecordMessage
+    | TrackMessage
+    | PolicyMessage
+    | WeatherMessage
 )
 
 _PARSERS: dict[str, type[BaseModel]] = {
@@ -135,6 +154,7 @@ _PARSERS: dict[str, type[BaseModel]] = {
     "record": RecordMessage,
     "track": TrackMessage,
     "policy": PolicyMessage,
+    "weather": WeatherMessage,
 }
 
 

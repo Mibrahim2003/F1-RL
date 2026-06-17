@@ -17,6 +17,7 @@ import pytest
 
 from f1rl.env.observations import (
     OBS_DIM,
+    OBS_VERSION,
     ObsParams,
     build_observation,
     cast_beams,
@@ -38,6 +39,10 @@ I_HEADING = 1
 I_LATERAL = 2
 I_CURV = slice(3, 8)  # 5 lookahead curvatures
 I_BEAMS = slice(8, 15)  # 7 edge-distance beams
+# ObservationV2 tail (Phase 3b).
+I_WEAR = 15
+I_COMPOUND = slice(16, 21)  # 5-way compound one-hot
+I_GRIP = 21
 
 
 def _params(cfg):
@@ -75,16 +80,79 @@ def _on_centerline_state(track, idx, speed=30.0):
 def test_observation_space_shape_and_dim():
     space = observation_space()
     assert space.shape == (OBS_DIM,)
-    assert OBS_DIM == 15
+    assert OBS_DIM == 22
+    assert OBS_VERSION == 2
 
 
-def test_build_observation_shape_15(track, cfg):
+def test_build_observation_shape_22(track, cfg):
     params = _params(cfg)
     state = _on_centerline_state(track, idx=0)
     obs = build_observation(track, state, params, _edge_cache(track))
     assert isinstance(obs, np.ndarray)
-    assert obs.shape == (15,)
+    assert obs.shape == (22,)
     assert obs.dtype.kind == "f"
+
+
+# --- ObservationV2 tail: wear, compound one-hot, grip indicator (Phase 3b) ----------------
+
+
+def test_tail_wear_passes_through_and_in_unit_range(track, cfg):
+    params = _params(cfg)
+    p = track.centerline[0]
+    t = track.tangent[0]
+    yaw = math.atan2(float(t[1]), float(t[0]))
+    for wear in (0.0, 0.37, 1.0):
+        state = CarState(x=float(p[0]), y=float(p[1]), yaw=yaw, vx=30.0, tire_wear=wear)
+        obs = build_observation(track, state, params, _edge_cache(track))
+        assert obs[I_WEAR] == pytest.approx(wear, abs=1e-6)
+        assert 0.0 <= obs[I_WEAR] <= 1.0
+
+
+def test_tail_compound_one_hot_matches_state(track, cfg):
+    params = _params(cfg)
+    state = _on_centerline_state(track, idx=0)
+    for compound in range(5):
+        st = CarState(x=state.x, y=state.y, yaw=state.yaw, vx=20.0, compound=compound)
+        obs = build_observation(track, st, params, _edge_cache(track))
+        onehot = obs[I_COMPOUND]
+        assert onehot.shape == (5,)
+        assert onehot.sum() == pytest.approx(1.0)
+        assert int(np.argmax(onehot)) == compound
+        assert set(np.unique(onehot)).issubset({0.0, 1.0})
+
+
+def test_tail_grip_indicator_passed_through_and_bounded(track, cfg):
+    params = _params(cfg)
+    state = _on_centerline_state(track, idx=0)
+    obs_lo = build_observation(track, state, params, _edge_cache(track), grip_indicator=0.5)
+    obs_hi = build_observation(track, state, params, _edge_cache(track), grip_indicator=1.7)
+    assert obs_lo[I_GRIP] == pytest.approx(0.5)
+    assert obs_hi[I_GRIP] == pytest.approx(1.7)
+    # Out-of-Box values are clipped so the checker never sees them.
+    space = observation_space()
+    obs_clip = build_observation(track, state, params, _edge_cache(track), grip_indicator=99.0)
+    assert space.contains(obs_clip.astype(space.dtype))
+
+
+def test_v1_slice_unchanged_by_tail(track, cfg):
+    # The v1 slice (0-14) must be byte-identical regardless of the Part 2 tail inputs.
+    params = _params(cfg)
+    base = _on_centerline_state(track, idx=len(track.centerline) // 3, speed=45.0)
+    a = build_observation(
+        track,
+        CarState(x=base.x, y=base.y, yaw=base.yaw, vx=base.vx, tire_wear=0.0, compound=0),
+        params,
+        _edge_cache(track),
+        grip_indicator=1.0,
+    )
+    b = build_observation(
+        track,
+        CarState(x=base.x, y=base.y, yaw=base.yaw, vx=base.vx, tire_wear=0.9, compound=3),
+        params,
+        _edge_cache(track),
+        grip_indicator=0.4,
+    )
+    np.testing.assert_array_equal(a[0:15], b[0:15])
 
 
 def test_observation_in_bounds_around_the_lap(track, cfg):
