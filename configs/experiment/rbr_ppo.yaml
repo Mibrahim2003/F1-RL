@@ -1,0 +1,106 @@
+# rbr_ppo — Phase 3a training run: one PPO policy learns red_bull_ring on kinematic physics.
+#
+# This file IS the source of truth for the run: every hyperparameter, reward weight, obs
+# parameter, env limit, and cadence lives here — never in train.py logic (CLAUDE.md rule).
+# It carries the full default.yaml blocks (sim/physics/obs/reward/env) so a run is fully
+# reproducible from this one file + the seed, then sets the training-specific blocks
+# (ppo/eval/checkpoint/wandb/device). load_config merges configs/track/red_bull_ring.yaml
+# under cfg.track automatically from track_id.
+#
+# Headline budget is 2_000_000 steps; the smoke/test path overrides n_envs/total_timesteps/
+# eval_freq/checkpoint_freq via dotlist on the CLI. SI units throughout.
+
+seed: 42
+
+track_id: red_bull_ring   # selects configs/track/red_bull_ring.yaml, merged under cfg.track
+
+# --- training device + parallelism ----------------------------------------------------
+device: cpu               # installed torch is CPU-only (4 cores); identical local & cloud
+n_envs: 4                 # SubprocVecEnv workers; ~core count (see SPS benchmark)
+total_timesteps: 2000000  # headline budget; smoke runs override to a few thousand
+
+# --- PPO hyperparameters (Stable-Baselines3 MlpPolicy) --------------------------------
+ppo:
+  n_steps: 2048           # rollout length per env (n_envs * n_steps transitions per update)
+  batch_size: 256         # minibatch size; must divide n_envs * n_steps
+  n_epochs: 10            # optimization epochs per rollout
+  gamma: 0.99             # discount (match env.norm_gamma)
+  gae_lambda: 0.95        # GAE advantage smoothing
+  ent_coef: 0.0           # entropy bonus; raise if the policy collapses to a fixed action
+  vf_coef: 0.5            # value-loss weight
+  learning_rate: 0.0003   # Adam LR
+  clip_range: 0.2         # PPO surrogate clip
+  max_grad_norm: 0.5      # gradient clipping
+
+# --- sim loop timing (matches default.yaml; control rate sets the step budget unit) ----
+sim:
+  control_hz: 20
+  substeps: 5
+  dt_physics: 0.01
+  grip: 1.0
+
+# --- physics (kinematic for Part 1; dynamic model is Part 2, swapped via make_physics) -
+physics:
+  model: kinematic
+  wheelbase: 3.6
+  mass: 798.0
+  max_steer_deg: 18.0
+  max_engine_force: 6000.0
+  max_brake_force: 16000.0
+  drag_coeff: 0.70
+  rolling_coeff: 0.015
+
+# --- ObservationV1 (OBS_VERSION = 1, length 15) — all tunable, SI units ----------------
+obs:
+  ref_speed: 92.0
+  lookahead_m: [10, 25, 50, 100, 150]
+  beam_angles_deg: [-90, -60, -30, 0, 30, 60, 90]
+  beam_max: 60.0
+  curvature_scale: 50.0
+
+# --- RewardV1 — progress-based, never rewards centerline proximity (most-iterated) -----
+reward:
+  w_progress: 1.0
+  w_offtrack: 1.0
+  w_step: 0.05
+  w_reverse: 2.0
+  offtrack_soft_m: 2.0
+  offtrack_exp: 2.0
+
+# --- env limits / termination + VecNormalize knobs -------------------------------------
+env:
+  target_laps: 1
+  max_steps: 4000
+  offtrack_limit_m: 12.0
+  wrong_way_steps: 40
+  wrong_way_ds_m: -0.05
+  start_speed: 0.0
+  start_randomize: true
+  failure_reward: -10.0
+  norm_reward: true
+  clip_obs: 10.0
+  clip_reward: 10.0
+  norm_gamma: 0.99
+
+# --- eval / checkpoint cadence (in training steps) -------------------------------------
+eval:
+  eval_freq: 50000        # run a deterministic eval episode + mp4 clip every N steps
+  n_eval_episodes: 1      # deterministic, so one episode is representative
+  deterministic: true
+  pole_time_s: 64.3       # red_bull_ring pole; lap time logged vs this and 2x this
+  video_fps: 20           # mp4 frame rate (matches control_hz)
+  record_video: true      # eval renders an mp4 via render/renderer.py
+
+checkpoint:
+  checkpoint_freq: 50000  # atomic checkpoint every N steps
+  keep_last_k: 3          # rolling window of recent checkpoints kept on disk
+  keep_best: true         # also keep the best-by-eval-return checkpoint
+  dir: checkpoints        # run checkpoints written under <dir>/<run_name>/
+
+# --- Weights & Biases logging (offline/local-CSV fallback on import failure or offline) -
+wandb:
+  project: f1rl-phase3a
+  entity: null            # null = your default W&B entity
+  mode: online            # "online" | "offline" | "disabled"; WANDB_MODE env overrides
+  group: rbr_ppo
+  tags: [phase-3a, red_bull_ring, kinematic, ppo]

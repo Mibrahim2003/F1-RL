@@ -102,6 +102,11 @@ export class SimSocket {
     this.send({ type: "track", id });
   }
 
+  /** Pick the watch-mode driver: the centerline autopilot, or a trained checkpoint by id. */
+  sendPolicy(source: "autopilot" | "checkpoint", id?: string): void {
+    this.send(id != null ? { type: "policy", source, id } : { type: "policy", source });
+  }
+
   sendControl(action: "play" | "pause" | "restart", speed?: 1 | 2 | 4): void {
     this.send(speed ? { type: "control", action, speed } : { type: "control", action });
   }

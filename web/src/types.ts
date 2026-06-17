@@ -98,6 +98,11 @@ export interface EventMessage {
   pole_time_s?: number;
   total_laps?: number;
   pole_str?: string;
+  // policy_changed / policy_error (watch-live checkpoint picker).
+  source?: "autopilot" | "checkpoint";
+  circuit_id?: string;
+  total_timesteps?: number;
+  message?: string;
 }
 
 export type ServerMessage = StateFrame | EventMessage;
@@ -125,6 +130,13 @@ export interface TrackMessage {
   id: string;
 }
 
+/** Select what drives the car in watch mode: the centerline autopilot or a checkpoint. */
+export interface PolicyMessage {
+  type: "policy";
+  source: "autopilot" | "checkpoint";
+  id?: string;
+}
+
 export interface ControlMessage {
   type: "control";
   action: "play" | "pause" | "restart";
@@ -141,7 +153,16 @@ export type ClientMessage =
   | ModeMessage
   | ControlMessage
   | RecordMessage
-  | TrackMessage;
+  | TrackMessage
+  | PolicyMessage;
+
+/** Catalog entry from GET /api/checkpoints (the watch-live policy picker source). */
+export interface CheckpointSummary {
+  id: string;
+  total_timesteps: number;
+  circuit_id: string;
+  obs_version: number;
+}
 
 /** Recording trajectory served by GET /recordings/{id}. */
 export interface RecordingFrame {

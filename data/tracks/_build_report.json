@@ -1,0 +1,208 @@
+{
+  "albert_park": {
+    "country": "Australia",
+    "id": "albert_park",
+    "length_error": 0.0066,
+    "length_m": 5243.0,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 5278.0,
+    "points": 1748,
+    "source": "fastf1"
+  },
+  "bahrain": {
+    "country": "Bahrain",
+    "id": "bahrain",
+    "length_error": 0.0133,
+    "length_m": 5340.3,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 5412.0,
+    "points": 1780,
+    "source": "fastf1"
+  },
+  "baku": {
+    "country": "Azerbaijan",
+    "id": "baku",
+    "length_error": 0.0069,
+    "length_m": 5961.5,
+    "low_confidence": true,
+    "notes": [
+      "self-intersecting asphalt edge"
+    ],
+    "official_length_m": 6003.0,
+    "points": 1987,
+    "source": "fastf1"
+  },
+  "catalunya": {
+    "country": "Spain",
+    "id": "catalunya",
+    "length_error": 0.0087,
+    "length_m": 4616.3,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 4657.0,
+    "points": 1539,
+    "source": "fastf1"
+  },
+  "cota": {
+    "country": "United States",
+    "id": "cota",
+    "length_error": 0.0151,
+    "length_m": 5429.8,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 5513.0,
+    "points": 1810,
+    "source": "fastf1"
+  },
+  "hungaroring": {
+    "country": "Hungary",
+    "id": "hungaroring",
+    "length_error": 0.0087,
+    "length_m": 4343.0,
+    "low_confidence": true,
+    "notes": [
+      "self-intersecting asphalt edge"
+    ],
+    "official_length_m": 4381.0,
+    "points": 1448,
+    "source": "fastf1"
+  },
+  "interlagos": {
+    "country": "Brazil",
+    "id": "interlagos",
+    "length_error": 0.0178,
+    "length_m": 4232.5,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 4309.0,
+    "points": 1411,
+    "source": "fastf1"
+  },
+  "jeddah": {
+    "country": "Saudi Arabia",
+    "id": "jeddah",
+    "length_error": 0.0092,
+    "length_m": 6117.1,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 6174.0,
+    "points": 2039,
+    "source": "fastf1"
+  },
+  "las_vegas": {
+    "country": "United States",
+    "id": "las_vegas",
+    "length_error": 0.0023,
+    "length_m": 6186.5,
+    "low_confidence": true,
+    "notes": [
+      "self-intersecting asphalt edge"
+    ],
+    "official_length_m": 6201.0,
+    "points": 2062,
+    "source": "fastf1"
+  },
+  "lusail": {
+    "country": "Qatar",
+    "id": "lusail",
+    "length_error": 0.0047,
+    "length_m": 5393.3,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 5419.0,
+    "points": 1798,
+    "source": "fastf1"
+  },
+  "marina_bay": {
+    "country": "Singapore",
+    "id": "marina_bay",
+    "length_error": 0.0151,
+    "length_m": 4865.4,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 4940.0,
+    "points": 1622,
+    "source": "fastf1"
+  },
+  "mexico_city": {
+    "country": "Mexico",
+    "id": "mexico_city",
+    "length_error": 0.0132,
+    "length_m": 4247.1,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 4304.0,
+    "points": 1416,
+    "source": "fastf1"
+  },
+  "miami": {
+    "country": "United States",
+    "id": "miami",
+    "length_error": 0.0111,
+    "length_m": 5351.7,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 5412.0,
+    "points": 1784,
+    "source": "fastf1"
+  },
+  "monaco": {
+    "country": "Monaco",
+    "id": "monaco",
+    "length_error": 0.0177,
+    "length_m": 3278.1,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 3337.0,
+    "points": 1093,
+    "source": "fastf1"
+  },
+  "montreal": {
+    "country": "Canada",
+    "id": "montreal",
+    "length_error": 0.0106,
+    "length_m": 4315.0,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 4361.0,
+    "points": 1438,
+    "source": "fastf1"
+  },
+  "monza": {
+    "country": "Italy",
+    "id": "monza",
+    "length_error": 0.0053,
+    "length_m": 5762.5,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 5793.0,
+    "points": 1921,
+    "source": "fastf1"
+  },
+  "red_bull_ring": {
+    "country": "Austria",
+    "id": "red_bull_ring",
+    "length_error": 0.0055,
+    "length_m": 4294.1,
+    "low_confidence": false,
+    "notes": [],
+    "official_length_m": 4318.0,
+    "points": 1431,
+    "source": "fastf1"
+  },
+  "shanghai": {
+    "country": "China",
+    "id": "shanghai",
+    "length_error": 0.0136,
+    "length_m": 5377.0,
+    "low_confidence": true,
+    "notes": [
+      "self-intersecting asphalt edge"
+    ],
+    "official_length_m": 5451.0,
+    "points": 1792,
+    "source": "fastf1"
+  }
+}

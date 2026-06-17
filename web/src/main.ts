@@ -16,6 +16,7 @@ import { Hud } from "./hud/telemetry.ts";
 import { ReplayPlayer, fetchRecording, listRecordings } from "./replay/player.ts";
 import { TrackSelector } from "./ui/selector.ts";
 import { ConfigPanel } from "./ui/config_panel.ts";
+import { PolicyPicker } from "./ui/policy_picker.ts";
 import type { Meta, Mode, SimMode, StateFrame, SurfaceEdit, Track } from "./types.ts";
 
 const $ = (id: string): HTMLElement => {
@@ -48,6 +49,12 @@ const configPanel = new ConfigPanel($("stage"), {
   onGlyph: (style) => renderer.setGlyph(style),
 });
 
+// Watch-live: pick the centerline autopilot or a trained checkpoint (mounted in the viewport).
+const policyPicker = new PolicyPicker($("viewport"), {
+  onAutopilot: () => socket.sendPolicy("autopilot"),
+  onCheckpoint: (id) => socket.sendPolicy("checkpoint", id),
+});
+
 const keyboard = new Keyboard(
   (input) => socket.sendInput(input.steer, input.throttle, input.brake, false),
   () => socket.sendInput(0, 0, 0, true),
@@ -59,6 +66,22 @@ const socket = new SimSocket({
     if (ev.event === "recording_saved") {
       // refresh recordings list silently; replay picks newest on demand
       void listRecordings().catch(() => {});
+    } else if (ev.event === "policy_error") {
+      // non-fatal: server fell back to the autopilot, viewport keeps streaming
+      policyPicker.reset();
+      policyPicker.setStatus(
+        `Checkpoint '${ev.id ?? ""}' failed to load — using autopilot.`,
+        "error",
+      );
+    } else if (ev.event === "policy_changed") {
+      if (ev.source === "checkpoint") {
+        policyPicker.setStatus(
+          `Policy: ${ev.id ?? ""} (${ev.circuit_id ?? "?"})`,
+          "ok",
+        );
+      } else {
+        policyPicker.setStatus("Autopilot (centerline)", "");
+      }
     } else if (ev.event === "track_changed" && ev.pole_time_s !== undefined) {
       // server confirms the switch and sends the new circuit's pace meta
       hud.setMeta({
@@ -107,6 +130,8 @@ async function switchTrack(id: string): Promise<void> {
     renderer.clearPoses();
     hud.reset();
     updateCircuitChip(track);
+    // The server drops any active policy back to the autopilot on a circuit switch.
+    policyPicker.reset();
     store.set({ trackId: id, lowConfidence: track.low_confidence, loadingTrack: false });
     if (store.get().mode === "configure") openConfigPanel();
   } catch {
@@ -211,6 +236,10 @@ store.subscribe((s) => {
   // overlays
   $("manual-overlay").classList.toggle("hidden", s.mode !== "manual");
   $("replay-scrub").classList.toggle("hidden", s.mode !== "replay");
+
+  // watch-live policy picker is visible only while watching a live run
+  if (s.mode === "watch") policyPicker.show();
+  else policyPicker.hide();
 
   // engine-offline / error banner
   const banner = $("banner");
@@ -480,6 +509,7 @@ async function start(): Promise<void> {
     updateCircuitChip(track);
     store.set({ trackId: meta.track_id, lowConfidence: track.low_confidence });
     void selector.refresh(); // populate the catalog for the selector
+    void policyPicker.refresh(); // populate the watch-live checkpoint dropdown
   } catch {
     // no backend yet — shell still renders; banner shown via store
     hud.reset();

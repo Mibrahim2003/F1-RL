@@ -3,14 +3,15 @@ input->state round-trip, and input clamping."""
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
 import numpy as np
 from fastapi.testclient import TestClient
 
-from f1rl.server.app import create_app
-from f1rl.server.messages import InputMessage, parse_client_message
+from f1rl.server.app import create_app, scan_checkpoints
+from f1rl.server.messages import InputMessage, PolicyMessage, parse_client_message
 from f1rl.track.build import BuildConfig, build_from_points, save_track
 from f1rl.track.schema import Track
 from f1rl.utils.config import load_config
@@ -62,7 +63,8 @@ def test_get_track_returns_geometry():
 
 def test_get_track_unknown_id_404():
     with _client() as client:
-        assert client.get("/track/monza").status_code == 404
+        # An id with no cached .npz (monza et al. are now built circuits) → 404.
+        assert client.get("/track/no_such_circuit").status_code == 404
 
 
 def test_get_meta():
@@ -186,3 +188,97 @@ def test_surface_save_oval_rejected(tmp_path):
 def test_surface_save_unbuilt_404(tmp_path):
     with _client_with_tracks(tmp_path, "monza") as client:
         assert client.post("/track/spa/surfaces", json={"kerb_width": 2.0}).status_code == 404
+
+
+# ----- Phase 3a: checkpoint catalog + watch-live policy picker ----------------------------
+
+
+def _write_fake_checkpoint(
+    root: Path, rel_id: str, *, total_timesteps: int = 1000, obs_version: int = 1
+) -> Path:
+    """Write a minimal checkpoint dir (model.zip + meta.json) for catalog/scan tests.
+
+    The ``model.zip`` is a stub — these tests cover the scanner and the listing route, not a
+    real torch load, so no SB3 dependency is pulled in.
+    """
+    ckpt = root / rel_id
+    ckpt.mkdir(parents=True, exist_ok=True)
+    (ckpt / "model.zip").write_bytes(b"stub")
+    meta = {
+        "total_timesteps": total_timesteps,
+        "circuit_id": "red_bull_ring",
+        "obs_version": obs_version,
+        "action_shape": [2],
+        "seed": 42,
+    }
+    (ckpt / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    return ckpt
+
+
+def _client_with_checkpoints(tmp_path: Path) -> TestClient:
+    cfg = load_config("default")
+    cfg.server.checkpoints_dir = str(tmp_path)
+    return TestClient(create_app(cfg))
+
+
+def test_scan_checkpoints_finds_nested(tmp_path):
+    _write_fake_checkpoint(tmp_path, "runA/checkpoints/final", total_timesteps=5000)
+    _write_fake_checkpoint(tmp_path, "runB/checkpoints/early", total_timesteps=1000)
+    # A dir missing model.zip is not a checkpoint.
+    (tmp_path / "not_a_ckpt").mkdir()
+    (tmp_path / "not_a_ckpt" / "meta.json").write_text("{}", encoding="utf-8")
+
+    items = scan_checkpoints(tmp_path)
+    ids = {it["id"] for it in items}
+    assert ids == {"runA/checkpoints/final", "runB/checkpoints/early"}
+    # Sorted least-trained first within a circuit (early before final).
+    assert items[0]["total_timesteps"] == 1000
+    assert items[0]["circuit_id"] == "red_bull_ring"
+    assert items[0]["obs_version"] == 1
+
+
+def test_scan_checkpoints_missing_root_empty(tmp_path):
+    assert scan_checkpoints(tmp_path / "nope") == []
+
+
+def test_api_checkpoints_route(tmp_path):
+    _write_fake_checkpoint(tmp_path, "runA/final")
+    with _client_with_checkpoints(tmp_path) as client:
+        data = client.get("/api/checkpoints").json()["checkpoints"]
+        assert len(data) == 1
+        entry = data[0]
+        assert entry["id"] == "runA/final"
+        assert set(entry) == {"id", "total_timesteps", "circuit_id", "obs_version"}
+
+
+def test_policy_message_parses():
+    msg = parse_client_message({"type": "policy", "source": "autopilot"})
+    assert isinstance(msg, PolicyMessage)
+    assert msg.source == "autopilot" and msg.id is None
+    msg2 = parse_client_message({"type": "policy", "source": "checkpoint", "id": "runA/final"})
+    assert isinstance(msg2, PolicyMessage)
+    assert msg2.source == "checkpoint" and msg2.id == "runA/final"
+
+
+def test_policy_message_rejects_bad_source():
+    assert parse_client_message({"type": "policy", "source": "bogus"}) is None
+
+
+def test_ws_policy_autopilot_roundtrip(tmp_path):
+    # Switching to the autopilot needs no checkpoint load (no torch), so this stays fast.
+    with _client_with_checkpoints(tmp_path) as client, client.websocket_connect("/ws/sim") as ws:
+        ws.send_json({"type": "policy", "source": "autopilot"})
+        ev = _recv_event(ws, "policy_changed")
+        assert ev["source"] == "autopilot"
+
+
+def test_ws_policy_bad_checkpoint_falls_back(tmp_path):
+    # A missing/unknown checkpoint id must surface policy_error, never crash the socket.
+    with _client_with_checkpoints(tmp_path) as client, client.websocket_connect("/ws/sim") as ws:
+        ws.send_json({"type": "policy", "source": "checkpoint", "id": "does/not/exist"})
+        ev = _recv_event(ws, "policy_error")
+        assert ev["id"] == "does/not/exist"
+        # The sim keeps streaming state frames after the error (socket alive).
+        ws.send_json({"type": "mode", "mode": "watch"})
+        frame = ws.receive_json()
+        assert frame["type"] in {"state", "event"}
