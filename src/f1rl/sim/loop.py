@@ -11,9 +11,13 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from f1rl.env.conditions import Conditions
+from f1rl.env.observations import track_query
 from f1rl.physics.base import CarState, PhysicsModel
 from f1rl.sim.timing import LapTimer
 from f1rl.track.schema import Track
+
+_COMPOUND_NAMES = ("soft", "medium", "hard", "intermediate", "wet")
 
 
 @dataclass(frozen=True)
@@ -50,29 +54,56 @@ class SimLoop:
         sim_cfg: SimConfig,
         pole_time_s: float,
         total_laps: int,
+        conditions: Conditions | None = None,
     ) -> None:
         self.physics = physics
         self.track = track
         self.cfg = sim_cfg
         self.total_laps = int(total_laps)
         self.timer = LapTimer(track, pole_time_s)
+        # The grip provider (shared with the env via the same Conditions.grip_at). When None,
+        # the loop uses the constant sim grip — the Phase-1 kinematic behavior.
+        self.conditions = conditions
+        self._grip = float(sim_cfg.grip)
         self.reset()
 
     def _start_state(self) -> CarState:
         c = self.track.centerline[0]
         tan = self.track.tangent[0]
-        return CarState(x=float(c[0]), y=float(c[1]), yaw=math.atan2(tan[1], tan[0]))
+        compound = int(self.conditions.tires.start_compound) if self.conditions else 0
+        return CarState(
+            x=float(c[0]), y=float(c[1]), yaw=math.atan2(tan[1], tan[0]), compound=compound
+        )
 
     def reset(self) -> None:
         self.t = 0.0
         self.timer.reset()
         self.state = self._start_state()
+        self._grip = float(self.cfg.grip)
+
+    def set_weather(self, weather: str) -> None:
+        """Set the live weather (``dry`` | ``damp`` | ``wet``); changes grip immediately."""
+        if self.conditions is not None:
+            self.conditions.set_weather(weather)
+
+    def _step_grip(self) -> float:
+        """Grip for this step: the shared pipeline (surface/weather/wear) or constant fallback."""
+        if self.conditions is None:
+            return self.cfg.grip
+        idx, _s, signed_lateral, _hw, _heading = track_query(
+            self.track, self.state.x, self.state.y, self.state.yaw
+        )
+        return self.conditions.grip_at(
+            self.track, idx, signed_lateral, self.state.tire_wear, self.state.compound
+        )
 
     def step(self, steer: float, longitudinal: float) -> dict[str, Any]:
         """Advance one control step and return the state frame."""
+        grip = self._step_grip()
+        self._grip = grip
         for _ in range(self.cfg.substeps):
             self.state = self.physics.step(
-                self.state, steer, longitudinal, self.cfg.grip, self.cfg.dt_physics
+                self.state, steer, longitudinal, grip, self.cfg.dt_physics
             )
         self.t += self.cfg.dt_control
         timing = self.timer.update(self.state.x, self.state.y, self.t)
@@ -98,5 +129,10 @@ class SimLoop:
                 "best_lap": round(timing.best_lap, 3) if timing.best_lap is not None else None,
                 "last_lap": round(timing.last_lap, 3) if timing.last_lap is not None else None,
                 "progress": round(timing.progress, 4),
+                # Phase 3b grip-pipeline readouts.
+                "compound": _COMPOUND_NAMES[s.compound] if 0 <= s.compound < 5 else "soft",
+                "tire_wear": round(s.tire_wear, 4),
+                "grip": round(self._grip, 4),
+                "weather": self.conditions.weather if self.conditions is not None else "dry",
             },
         }

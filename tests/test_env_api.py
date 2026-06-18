@@ -53,7 +53,27 @@ def test_observation_space_is_box_of_obs_dim(cfg):
     space = env.observation_space
     assert isinstance(space, gym.spaces.Box)
     assert space.shape == (OBS_DIM,)
-    assert OBS_DIM == 15
+    assert OBS_DIM == 22  # ObservationV2 (Phase 3b): v1(15) + wear + compound_onehot[5] + grip
+
+
+def test_dynamic_env_passes_checker(dyn_cfg):
+    # The dynamic-physics env (friction circle + grip pipeline) must also pass the checker
+    # at obs v2 with the unchanged action space (spec §10, plan §B gate).
+    env = RacingEnv(dyn_cfg)
+    check_env(env.unwrapped, skip_render_check=True)
+    assert env.action_space.shape == (2,)
+    assert env.observation_space.shape == (OBS_DIM,)
+
+
+def test_dynamic_env_random_rollout_no_nan(dyn_cfg):
+    env = RacingEnv(dyn_cfg, seed=3)
+    obs, _ = env.reset(seed=3)
+    for _ in range(300):
+        obs, reward, terminated, truncated, _ = env.step(env.action_space.sample())
+        assert np.all(np.isfinite(obs)) and env.observation_space.contains(obs)
+        assert np.isfinite(reward)
+        if terminated or truncated:
+            obs, _ = env.reset()
 
 
 def test_reset_returns_obs_in_space(cfg):

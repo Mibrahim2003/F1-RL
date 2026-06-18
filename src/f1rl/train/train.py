@@ -28,6 +28,7 @@ from typing import Any
 from f1rl.env.factory import make_vec_env
 from f1rl.train.callbacks import CheckpointCallback, EvalVideoCallback
 from f1rl.train.checkpointing import load_checkpoint
+from f1rl.train.curriculum import CurriculumCallback
 from f1rl.train.wandb_logger import RunLogger
 from f1rl.utils.config import load_config
 from f1rl.utils.seeding import seed_everything
@@ -127,7 +128,13 @@ def _make_callbacks(cfg: Any, run_dir: Path, seed: int, logger: RunLogger) -> li
         logger=logger,
         checkpoint_callback=checkpoint_cb,
     )
-    return [checkpoint_cb, eval_cb]
+
+    callbacks: list[Any] = [checkpoint_cb, eval_cb]
+    # Curriculum ramps conditions (grip -> wear -> weather) by timestep; no-op when disabled.
+    curriculum_cb = CurriculumCallback(cfg, logger=logger)
+    if curriculum_cb.stages:
+        callbacks.append(curriculum_cb)
+    return callbacks
 
 
 def _track_pole(cfg: Any) -> float:

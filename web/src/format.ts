@@ -43,3 +43,34 @@ export function deltaColor(delta: number): string {
   if (delta > 0.03) return "var(--slower)";
   return "var(--text-2)";
 }
+
+type Compound = "soft" | "medium" | "hard" | "intermediate" | "wet";
+
+/** One-letter tyre badge for a compound (Phase 3b). */
+export function compoundLetter(c: Compound | undefined): string {
+  return { soft: "S", medium: "M", hard: "H", intermediate: "I", wet: "W" }[c ?? "soft"];
+}
+
+/** Tyre-dot color for a compound, reusing the design tokens. */
+export function compoundColor(c: Compound | undefined): string {
+  const map: Record<Compound, string> = {
+    soft: "var(--tyre-s)",
+    medium: "var(--tyre-m)",
+    hard: "var(--tyre-h)",
+    intermediate: "var(--tyre-i, #43b047)",
+    wet: "var(--tyre-w, #2f6fd0)",
+  };
+  return map[c ?? "soft"];
+}
+
+/** Tyre wear 0..1 -> "NN %" (placeholder when absent). */
+export function formatWear(wear: number | undefined): string {
+  if (wear === undefined || !Number.isFinite(wear)) return "— %";
+  return `${Math.round(Math.max(0, Math.min(1, wear)) * 100)} %`;
+}
+
+/** Effective grip scalar -> 2-decimal readout (placeholder when absent). */
+export function formatGrip(grip: number | undefined): string {
+  if (grip === undefined || !Number.isFinite(grip)) return "—";
+  return grip.toFixed(2);
+}

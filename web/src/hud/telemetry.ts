@@ -7,7 +7,17 @@
  * The tower renders data-driven so 22 rows can drop in later.
  */
 
-import { deltaColor, formatClock, formatDelta, formatLapTime, formatSpeed } from "../format.ts";
+import {
+  compoundColor,
+  compoundLetter,
+  deltaColor,
+  formatClock,
+  formatDelta,
+  formatGrip,
+  formatLapTime,
+  formatSpeed,
+  formatWear,
+} from "../format.ts";
 import type { Meta, StateFrame } from "../types.ts";
 
 interface TowerRowData {
@@ -55,12 +65,21 @@ export class Hud {
     $("lap").textContent = String(Math.max(1, tm.lap));
     if (tm.lap_total > 0) $("lap-total").textContent = String(tm.lap_total);
 
+    // Phase 3b: tyre compound + wear, and the live grip / weather (grip pipeline).
+    const dot = $("tyre-dot");
+    dot.textContent = compoundLetter(tm.compound);
+    dot.style.background = compoundColor(tm.compound);
+    $("tyre-wear").textContent = formatWear(tm.tire_wear);
+    $("grip").textContent = formatGrip(tm.grip);
+    $("weather").textContent = (tm.weather ?? "dry").toUpperCase();
+
     // top-bar session clock (use frame time as the running clock)
     $("clock").textContent = formatClock(frame.t);
 
-    // timing tower (single row, populated with live gap = LEADER)
+    // timing tower (single row; tyre dot tracks the live compound)
     this.renderTower({
       ...this.defaultRow(),
+      tyreColor: compoundColor(tm.compound),
       gap: "LEADER",
       gapColor: "var(--text)",
     });
@@ -76,6 +95,10 @@ export class Hud {
     delta.textContent = "+0.000";
     delta.style.color = "var(--text-2)";
     $("lap").textContent = "1";
+    $("tyre-dot").textContent = "S";
+    $("tyre-wear").textContent = "— %";
+    $("grip").textContent = "—";
+    $("weather").textContent = "DRY";
     this.renderTower(this.defaultRow());
   }
 

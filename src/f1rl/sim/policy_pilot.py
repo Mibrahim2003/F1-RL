@@ -20,11 +20,13 @@ from typing import Any
 
 import numpy as np
 
+from f1rl.env.conditions import Conditions
 from f1rl.env.observations import (
     EdgeCache,
     ObsParams,
     build_edge_cache,
     build_observation,
+    track_query,
 )
 from f1rl.physics.base import CarState
 from f1rl.track.schema import Track
@@ -86,6 +88,8 @@ class PolicyPilot:
         # Build the obs params and the per-track edge cache once (beams reuse it every step).
         self._params: ObsParams = ObsParams.from_config(cfg)
         self._edge_cache: EdgeCache = build_edge_cache(track)
+        # The shared grip provider so the obs grip-indicator matches training (ObservationV2).
+        self._conditions = Conditions.from_config(cfg)
 
         env_node = getattr(cfg, "env", None)
         self._clip_obs = (
@@ -99,7 +103,15 @@ class PolicyPilot:
         saved VecNormalize stats (clipped to ``clip_obs``), and queries the policy
         deterministically. Both outputs are in ``[-1, 1]`` (the action space).
         """
-        obs = build_observation(self.track, state, self._params, self._edge_cache)
+        idx, _s, signed_lateral, _hw, _heading = track_query(
+            self.track, state.x, state.y, state.yaw
+        )
+        grip_ind = self._conditions.grip_indicator(
+            self.track, idx, signed_lateral, state.tire_wear, state.compound
+        )
+        obs = build_observation(
+            self.track, state, self._params, self._edge_cache, grip_indicator=grip_ind
+        )
         norm_obs = _normalize_obs(np.asarray(obs, dtype=np.float64), self._obs_rms, self._clip_obs)
         action, _ = self.model.predict(norm_obs.astype(np.float32), deterministic=True)
         steer = float(np.clip(action[0], -1.0, 1.0))

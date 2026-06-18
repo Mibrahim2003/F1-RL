@@ -72,12 +72,12 @@ This single rule, simulate in real meters, is what makes the car and the track s
 
 ## 4. The grip pipeline (central abstraction)
 
-Grip is one scalar that gates how much force a tire produces. Every realism feature is a multiplier on grip. Build this from the first physics commit and set the multipliers to constants until each feature lands.
+Grip is one scalar that gates how much force a tire produces. Every realism feature is a multiplier on grip.
 
 ```python
-def effective_grip(mu_base, compound, wear, weather, surface_zone):
+def effective_grip(mu_base: float, compound: int, wear: float, weather: int, surface_zone: int) -> float:
     return (mu_base
-            * tire_factor(compound, wear)    # soft > medium > hard, falls as wear rises
+            * tire_factor(compound, wear)     # falls as wear rises
             * weather_factor(weather)         # dry 1.0, damp ~0.8, wet ~0.6
             * surface_factor(surface_zone))   # asphalt 1.0, kerb ~0.9, grass ~0.4, gravel ~0.3
 ```
@@ -101,7 +101,10 @@ Decision: write the car model. A 2D dynamic bicycle model with a friction-circle
 Build in two steps behind one interface:
 
 1. Kinematic bicycle model first. No tire slip, turning radius from wheelbase, steering, and speed. Use this to get the environment, observations, rewards, and the first learned agent working.
-2. Dynamic bicycle model second. Lateral velocity, yaw rate, slip angles, tire forces clamped to the friction circle. Swap this in behind the same interface with no env changes. Start the tire force as a linear model. Upgrade to a simplified Pacejka curve only if the feel needs more.
+2. Dynamic bicycle model second. Uses a semi-implicit Euler integration scheme with 5 substeps (`dt=0.01`).
+   - Computes tire slip angles and linear cornering stiffness.
+   - Restricts total tire force using a **Friction Circle**: `clamp_to_circle(fx, fy, max_grip_force)`.
+   - Incorporates a low-speed kinematic fallback (`v_blend`, `v_eps`) to prevent singularity when `vx` approaches zero.
 
 Car state and the physics interface:
 
@@ -198,13 +201,14 @@ Version 1, single car, fixed length about 15:
 - Track curvature sampled at 5 lookahead distances ahead along the centerline, for example 10, 25, 50, 100, and 150 m. This is how the car sees the upcoming corners.
 - 7 rangefinder beams cast from the car to the asphalt edge at fixed angles, for example minus 90 to plus 90 degrees, each giving normalized distance to the edge.
 
-Extensions added in later phases, which change the vector length and require retraining at that point:
+**ObservationV2 (Phase 3b Dynamic Model)**: Fixed length of 22 (OBS_VERSION = 2).
+- `[0:15]` The exact 15-length slice from V1 (speed, heading error, lateral offset, curvature lookahead, rangefinders).
+- `[15]` Tire wear (0.0 to 1.0).
+- `[16:20]` Tire compound (One-hot encoded: Soft, Medium, Hard, Intermediate, Wet).
+- `[21]` Grip/Weather indicator (e.g., 1.0 for dry, lower for wet).
+- The relative position and velocity of the K nearest cars (added in later phases).
 
-- Tire wear and a compound indicator.
-- A grip or weather indicator.
-- The relative position and velocity of the K nearest cars, expressed in the car body frame.
-
-The observation version is fixed per phase. When the vector changes, retrain. This is expected and clean.
+The observation version is fixed per phase. When the vector layout changes, the schema enforces retraining by refusing a checkpoint resume on a mismatched version.
 
 ---
 
@@ -297,6 +301,7 @@ The recorded-trajectory JSON format (section 10's recorder output) is the shared
 - Checkpoints write to Google Drive on Colab or to notebook output on Kaggle.
 - An evaluation callback periodically runs one deterministic episode, records it, renders a short clip, and logs the clip and the metrics to Weights and Biases.
 - Logged metrics: episode return, lap time against the pole and twice the pole, off-track count, contact count in the racing phase, and the learning curves.
+- **Curriculum Learning**: Staged realism is enforced through a config-driven `CurriculumCallback`. The callback steps through stages (e.g., Dry -> Damp -> Full Dynamic with Tire Wear) based on the current timestep, calling an `apply_conditions` hook on the environment without halting the training loop.
 
 ---
 
