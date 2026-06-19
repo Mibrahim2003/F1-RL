@@ -92,6 +92,18 @@ max_force += 0.5 * rho * Cl * area * speed**2
 
 Tires, weather, and surface all reduce to changing one number. Adding a feature means writing one factor function, not touching the physics core.
 
+**On `mu_base` (read this before trusting the lap-time benchmark).** `mu_base` is an **effective
+base-grip coefficient**, not a literal tire–road friction coefficient. It lumps mechanical tire
+grip together with a baseline aero/ground-effect contribution, and it is **calibrated per car**
+(`f1rl.train.calibrate`) so that a clean optimal lap lands near the real pole — see §9. In
+practice the calibrated value runs well above a physical road μ (the tuned `red_bull_ring` run
+uses `mu_base ≈ 1.95`, and the easy-grip curriculum stage uses `≈ 2.3`), because in this
+lumped-parameter model `mu_base` also stands in for grip that a higher-fidelity model would get
+from downforce. The speed-dependent `downforce_coeff * v²` term in the friction circle adds on
+top of it. This is a deliberate modeling choice: the lap-time-vs-pole comparison is fair
+*because the car is calibrated to it*, not because `mu_base` is a measured friction value. Do
+not describe `mu_base` as "dry-asphalt friction" in code or config comments.
+
 ---
 
 ## 5. Physics model
@@ -129,6 +141,13 @@ class PhysicsModel(Protocol):
 The env computes `grip` from the grip pipeline and passes a single scalar in. The physics step is a pure function of state, controls, grip, and dt. No globals, no rendering, no track lookups inside the step.
 
 Physics parameters live in config with realistic F1-scale defaults, all tunable: wheelbase about 3.6 m, mass about 770 to 800 kg, max steer about 18 degrees at the wheels, plus engine force, brake force, drag, rolling resistance, and an optional downforce coefficient. None of these are load-bearing constants. Tune them in config.
+
+Calibration note: the grip level (`mu_base`), `downforce_coeff`, `max_engine_force`, and
+`max_brake_force` are the levers `f1rl.train.calibrate` adjusts so a clean optimal lap lands
+near the real pole. As covered in §4, the calibrated `mu_base` is a lumped effective-grip
+coefficient and runs above a physical road μ — that is intentional, not a bug. If a future
+upgrade wants literal-physics grip, lower `mu_base` toward ~1.5–1.8 and let `downforce_coeff`
+carry high-speed cornering, then re-run calibration and retrain.
 
 ---
 
@@ -201,14 +220,17 @@ Version 1, single car, fixed length about 15:
 - Track curvature sampled at 5 lookahead distances ahead along the centerline, for example 10, 25, 50, 100, and 150 m. This is how the car sees the upcoming corners.
 - 7 rangefinder beams cast from the car to the asphalt edge at fixed angles, for example minus 90 to plus 90 degrees, each giving normalized distance to the edge.
 
-**ObservationV2 (Phase 3b Dynamic Model)**: Fixed length of 22 (OBS_VERSION = 2).
-- `[0:15]` The exact 15-length slice from V1 (speed, heading error, lateral offset, curvature lookahead, rangefinders).
+**ObservationV2 (Phase 3b Dynamic Model)**: Fixed length of 22 (OBS_VERSION = 2). This is the
+**only** layout the code produces now; V1 (length 15) is historical — it is described above for
+the record, but `observations.py` hard-codes `OBS_DIM = 22` and there is no V1 builder left.
+Index ranges below use Python slice notation (half-open), matching `observations.py`:
+- `[0:15]` The exact 15-length slice from V1 (speed, heading error, lateral offset, 5 curvature lookaheads, 7 rangefinders).
 - `[15]` Tire wear (0.0 to 1.0).
-- `[16:20]` Tire compound (One-hot encoded: Soft, Medium, Hard, Intermediate, Wet).
+- `[16:21]` Tire compound — **5-wide** one-hot (indices 16–20: Soft, Medium, Hard, Intermediate, Wet).
 - `[21]` Grip/Weather indicator (e.g., 1.0 for dry, lower for wet).
 - The relative position and velocity of the K nearest cars (added in later phases).
 
-The observation version is fixed per phase. When the vector layout changes, the schema enforces retraining by refusing a checkpoint resume on a mismatched version.
+The observation version is fixed per phase. When the vector layout changes, the schema enforces retraining by refusing a checkpoint resume on a mismatched version (`validate_checkpoint`). Because only V2 exists in code, any pre-V2 checkpoint is intentionally unloadable.
 
 ---
 
@@ -310,76 +332,101 @@ The recorded-trajectory JSON format (section 10's recorder output) is the shared
 ```
 f1-rl/
   README.md
-  PROJECT_VISION.md
-  TECHNICAL_DESIGN.md
+  CLAUDE.md                     # repo guidance for the coding agent
+  DISCREPANCIES.md              # standing doc/code audit + resolution log
   pyproject.toml                # dependencies and tooling
+  .claude/                      # design docs live here (committed, auto-loaded as context)
+    PROJECT_VISION.md
+    TECHNICAL_DESIGN.md         # this file
+    specs/<phase>.md            # per-phase specs
+    plan/<phase>-plan.md        # per-phase file-by-file build plans
+    agents/<role>.md            # subagent definitions
   configs/
-    default.yaml             # seed, sim, physics, server, and track_id (selects the track file)
+    default.yaml             # global defaults: seed, sim, physics, obs, reward, env, grip pipeline
     track/<circuit>.yaml     # per-circuit geometry, pole time, lap count; merged under cfg.track
-    experiment/<name>.yaml   # per-run overrides for the trainer; arrives in Phase 3 with train.py
+    experiment/<name>.yaml   # per-run trainer config (rbr_ppo = Phase 3a, rbr_dynamic = Phase 3b)
   data/
     raw_telemetry/              # FastF1 cache, gitignored
-    tracks/                     # processed Track files, .npz
+    tracks/                     # processed Track files, .npz, + _build_report.json
   recordings/                   # recorded-trajectory JSON, gitignored
   web/                          # interactive app frontend (Vite + TypeScript)
     index.html                  # the broadcast-style stage shell
     src/
       main.ts                   # bootstrap, stage scaling, UI state machine
-      tokens.css                # design tokens + fonts
+      state.ts                  # UI state machine + app store
+      types.ts                  # shared TS types (track, frame, messages)
+      format.ts                 # number/time formatting helpers
+      tokens.css  styles.css    # design tokens + fonts + layout
       net/socket.ts             # WebSocket client to /ws/sim
       input/keyboard.ts         # arrows + WASD -> input messages
       viewport/camera.ts        # meters<->pixels transform, pan/zoom/follow
       viewport/renderer.ts      # Canvas 2D draw, interpolating 20 Hz states
       hud/telemetry.ts          # tower + telemetry bar from state frames
       replay/player.ts          # load + play/pause/scrub a trajectory
+      ui/selector.ts            # track selector
+      ui/config_panel.ts        # surface/condition editor (Phase 2)
+      ui/policy_picker.ts       # checkpoint picker for watch-live (Phase 3)
   src/f1rl/
     __init__.py
     physics/
       base.py                   # CarState, PhysicsModel interface
       kinematic.py
-      dynamic.py
+      dynamic.py                # dynamic bicycle + friction circle
       tires.py                  # grip pipeline and tire model
+      factory.py                # make_physics: "kinematic" | "dynamic"
     track/
       schema.py                 # Track dataclass
+      geometry.py               # tangent/normal/arc-length/curvature (shared)
       oval.py                   # procedural oval Track (Phase 1)
-      build.py                  # FastF1 to processed Track, offline
+      build.py                  # FastF1 + OSM to processed Track, offline
       loader.py                 # load cached Track
     sim/
       loop.py                   # fixed-step simulation loop
       timing.py                 # lap timing and delta-to-pole
       recorder.py               # trajectory recording (JSON)
       autopilot.py              # centerline pure-pursuit for watch-live
+      policy_pilot.py           # checkpoint-driven pilot for watch-live
     server/
-      app.py                    # FastAPI app: WS /ws/sim, GET /track, GET /recordings
+      app.py                    # FastAPI app: WS /ws/sim, GET /track, GET /recordings, policies
       messages.py               # Pydantic client/server message models
     env/
       single_agent.py           # RacingEnv
-      multi_agent.py            # RacingParallelEnv
-      observations.py
-      rewards.py
-      conditions.py             # weather and surface state
+      observations.py           # ObservationV2 builder (length 22)
+      rewards.py                # reward_v1 / reward_v2 (progress core)
+      conditions.py             # weather/surface state + grip provider
+      factory.py                # make_vec_env (SB3 VecNormalize stack)
+      multi_agent.py            # RacingParallelEnv  (planned, Phase 5)
     render/
       renderer.py               # offscreen frames to mp4 for eval clips (training only)
     train/
-      train.py
-      evaluate.py
+      train.py                  # config-driven PPO entrypoint, checkpoint/resume
+      evaluate.py               # deterministic eval episode + metrics + clip
       callbacks.py              # checkpoint, eval video, wandb
-      selfplay.py               # shared-policy self-play
+      checkpointing.py          # save/load + obs-version/action-shape validation
+      curriculum.py             # CurriculumCallback (conditions by timestep)
+      benchmark.py              # steps-per-second sweep
+      calibrate.py              # tune grip/engine/brake so optimal lap ~ pole
+      wandb_logger.py           # W&B with local-CSV fallback
+      selfplay.py               # shared-policy self-play  (planned, Phase 5)
     utils/
       seeding.py
       config.py                 # OmegaConf load
   scripts/
     build_all_tracks.py
-    render_episode.py
-  notebooks/
-    colab_train.ipynb           # clone repo, run train.py on GPU
-  tests/
-    test_env_api.py             # gymnasium env_checker
-    test_physics.py
-    test_track_build.py
+    benchmark_sps.py
+  tests/                        # pytest: env_checker, physics (kinematic+dynamic), grip,
+                                # obs, rewards, termination, track build/oval, timing,
+                                # recorder, config, seeding, checkpoint, curriculum, server,
+                                # smoke-train (kinematic+dynamic), lap-benchmark
 ```
 
 The interactive app is split across the top-level `web/` frontend and two Python packages: `server/` (the FastAPI app and its message models) and `sim/` (the fixed-step loop, lap timing, the trajectory recorder, and the centerline autopilot for watch-live). The `recorder.py` lives under `sim/` because the recorded-trajectory JSON it produces is the shared interchange across live sim, replay, and eval clips. `render/renderer.py` stays under the package as the offscreen eval-clip renderer used by training only; it is never imported by the app or the training hot path.
+
+The tree reflects the repo **as built through Phase 3b**; entries tagged `(planned, Phase 5)`
+(`env/multi_agent.py`, `train/selfplay.py`) do not exist yet. Eval-clip rendering is invoked
+through `train/evaluate.py --video` (there is no separate `scripts/render_episode.py`), and
+there is no `notebooks/` directory yet — the Colab/Kaggle path clones the repo and runs
+`python -m f1rl.train.train` directly.
 
 ---
 

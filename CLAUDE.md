@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-A 2D top-down Formula 1 simulator where every car is driven by a learned (PPO) policy, racing real 2026 circuits. **Phase 1 is complete** (the interactive web app: FastAPI/WebSocket backend, fixed-step sim loop, kinematic bicycle physics, procedural oval track, lap timing, trajectory recorder, centerline autopilot, and the Vite/Canvas frontend with manual-drive/watch/replay). **Phase 2 (real circuits + surfaces) is the active work** — see `.claude/specs/`. The RL training code (Phase 3+) is not yet written.
+A 2D top-down Formula 1 simulator where every car is driven by a learned (PPO) policy, racing real 2026 circuits. **Phases 1 through 3b are complete and merged:** the interactive web app (FastAPI/WebSocket backend, fixed-step sim loop, lap timing, trajectory recorder, centerline autopilot, Vite/Canvas frontend with manual-drive/watch/replay), the offline FastF1+OSM track pipeline with real circuits cached under `data/tracks/`, the single-agent `RacingEnv` (ObservationV2, RewardV2), the swappable kinematic→dynamic physics with the grip pipeline (tires/weather/surface), and the PPO training core (checkpoint/resume, curriculum, W&B logging, lap-time benchmark vs the real pole). **Phase 4 (one policy across many circuits) is the next active work** — see `.claude/specs/` and section 15 of the design doc. Multi-agent racing (Phase 5+) is not yet written.
 
 ## Source of truth — read these first
 
@@ -28,7 +28,7 @@ The project uses Python 3.12 in a local venv (`.venv/`). Use the venv interprete
 .venv/Scripts/python.exe -m pip install -e ".[dev]"
 .venv/Scripts/python.exe -m pip install -e ".[dev,trackbuild]"
 
-# Lint + format (Ruff: line-length 100, target py312)
+# Lint + format (Ruff: line-length 100, target py310 — matches the >=3.10 support floor)
 .venv/Scripts/python.exe -m ruff check .
 .venv/Scripts/python.exe -m ruff format .
 

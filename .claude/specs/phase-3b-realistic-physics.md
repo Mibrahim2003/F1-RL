@@ -52,7 +52,7 @@ Technical requirements, functional and required:
 - The dynamic bicycle model with a friction-circle force limit, behind the `PhysicsModel` interface, with no env API change.
 - The grip pipeline, effective grip equals a base value times a tire factor for compound and wear, times a weather factor, times a surface factor from the Phase 2 zones.
 - Observations version 2, version 1 plus tire wear, a compound indicator, and a grip or weather indicator. The vector changes, so retrain.
-- Reward version 2, the same progress core with shaping adjusted for the harder dynamics.
+- Reward version 2: the same progress core plus an **opt-in** slip/spin penalty (`w_slip`, `slip_threshold`). With `w_slip = 0` (the shipped default) it is numerically identical to reward v1 — the extra shaping term is structurally present but **left un-tuned by default**; turning it on and re-shaping for the dynamics is expected follow-up, not a precondition for this phase. Never centerline-seeking.
 - A simple curriculum, high grip and no wear and dry weather first, then wear and weather.
 - A lap-time benchmark against the official pole, with twice the pole as the first milestone, and the delta logged.
 - Physics calibration so a clean optimal lap lands near the real pole, so the score is fair.
@@ -99,7 +99,7 @@ The Part 1 agent drives on kinematic physics. The car cannot lose grip, there ar
 - Swap the kinematic model for the dynamic bicycle model with a friction-circle limit, behind the `PhysicsModel` interface, with no env API change. Linear tires first, Pacejka optional.
 - Grip pipeline: effective grip equals a base value times a tire factor for compound and wear, times a weather factor, times a surface factor for asphalt, kerb, grass, and gravel from the Phase 2 tracks. One grip scalar gates the friction circle.
 - Observation version 2: add tire wear, a compound indicator, and a grip or weather indicator.
-- Reward version 2: the same progress core, with shaping adjusted for the harder dynamics, and tire management appearing over longer episodes.
+- Reward version 2: the same progress core, with an opt-in slip/spin penalty (`w_slip`, default 0 ⇒ identical to v1) reserved for re-shaping under the harder dynamics, and tire management appearing over longer episodes. The structure ships; the tuning is deferred.
 - Curriculum: start with high grip and no wear and dry weather, then introduce wear and weather, so the agent learns the basics before the hard cases.
 - Lap-time benchmark: compute the lap time, compare to the official pole and to twice the pole, and log the delta. Calibrate the car physics so a clean optimal lap lands near the pole.
 - Retrain from scratch, since the observation and the dynamics changed. A warm start from the Part 1 policy does not transfer cleanly across a changed observation, so do not rely on it.

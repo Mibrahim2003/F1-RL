@@ -250,6 +250,6 @@ Local tool. The build script logs per-circuit length error, source, and point co
 
 - Confirm the realism target, a faithful shape, true proportions, and a length within a few percent, since centimeter accuracy is not available from free data. Is that acceptable?
 - A default total track width where no edge data exists. Proposed near 12 m, wider on long straights.
-- The exact list of the 22 circuits to include, and whether to also build the two called-off circuits, Bahrain and Saudi Arabia, for completeness.
+- The exact list of circuits. **Resolved:** build the full 2026 calendar including Bahrain and Saudi Arabia (both are on the calendar — the earlier "called-off" framing was wrong). Reconciliation of the counts used in this doc: **22 = the active rounds referenced in the DoD; 24 = the circuit config files actually present** (22 + Bahrain + Saudi Arabia, kept for completeness). Plus the procedural `oval` placeholder, `configs/track/` holds 24 real circuits.
 - Licensing comfort for OSM data, which is open with attribution, and any community datasets.
 - Realistic top speed and acceleration values for the kinematic car in this phase, so the pacing looks right before the dynamic model arrives.

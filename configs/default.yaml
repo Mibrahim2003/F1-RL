@@ -1,5 +1,7 @@
-# Phase 1 global defaults. Every tunable constant lives here or in configs/track/ — none in
+# Global defaults (all phases). Every tunable constant lives here or in configs/track/ — none in
 # logic. All values are SI (meters, m/s, radians-from-degrees-where-noted, seconds, newtons, kg).
+# The kinematic/Phase-1 blocks and the Phase-3a/3b blocks (obs, reward, grip pipeline,
+# curriculum) all live here; experiment configs in configs/experiment/ override per run.
 
 seed: 42
 
@@ -38,8 +40,9 @@ server:
   tracks_dir: "data/tracks"   # cached real-circuit .npz files (built offline)
   checkpoints_dir: "runs"     # root scanned for trained checkpoints (watch-live policy picker)
 
-# --- Phase 3a (training core) ---------------------------------------------------------
-# ObservationV1 (OBS_VERSION = 1, length 15): all parameters tunable, SI units.
+# --- Observation (OBS_VERSION = 2, length 22) -----------------------------------------
+# These keys parameterize the v1 slice (0-14); the v2 tail (wear, compound one-hot, grip)
+# is derived from state + the grip pipeline, not from this block. All tunable, SI units.
 obs:
   ref_speed: 92.0                 # m/s, normalizes speed (vx / ref_speed); ~kinematic top speed
   lookahead_m: [10, 25, 50, 100, 150]            # 5 curvature-lookahead distances (m)
@@ -78,7 +81,9 @@ env:
 # effective_grip = mu_base * tire(compound, wear) * weather * surface — one scalar gating
 # the friction circle. Pure tables (physics/tires.py); the env owns the surface lookup.
 tires:
-  mu_base: 1.05                   # base friction coefficient (clean dry asphalt, fresh soft)
+  mu_base: 1.05                   # effective base-grip coefficient (lumps tire + baseline aero;
+                                  # NOT a literal road friction value — calibrated per car, see
+                                  # TECHNICAL_DESIGN §4). Trained runs override this much higher.
   # per-compound index order matches CarState.compound: 0 soft 1 medium 2 hard 3 inter 4 wet
   compound_grip: [1.00, 0.97, 0.94, 0.88, 0.82]   # soft > medium > hard; inter/wet lower (dry)
   compound_wear_falloff: [0.30, 0.22, 0.16, 0.20, 0.20]  # grip *= (1 - falloff * wear)

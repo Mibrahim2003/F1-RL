@@ -141,7 +141,8 @@ eval:
   eval_freq: 50000
   n_eval_episodes: 1
   deterministic: true
-  pole_time_s: 64.3
+  # pole derives from configs/track/red_bull_ring.yaml (pole_time_s: 64.3) — single source of
+  # truth. train.py falls back to cfg.track.pole_time_s; set eval.pole_time_s only to override.
   video_fps: 20
   record_video: true
 

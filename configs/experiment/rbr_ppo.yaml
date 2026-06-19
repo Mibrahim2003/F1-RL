@@ -50,7 +50,9 @@ physics:
   drag_coeff: 0.70
   rolling_coeff: 0.015
 
-# --- ObservationV1 (OBS_VERSION = 1, length 15) — all tunable, SI units ----------------
+# --- Observation (OBS_VERSION = 2, length 22) — all tunable, SI units ------------------
+# NOTE: the env always emits the 22-dim ObservationV2; on kinematic physics the v2 tail is
+# wear=0, soft one-hot, grip=1.0. (There is no length-15 obs in the code any more.)
 obs:
   ref_speed: 92.0
   lookahead_m: [10, 25, 50, 100, 150]
@@ -87,7 +89,8 @@ eval:
   eval_freq: 50000        # run a deterministic eval episode + mp4 clip every N steps
   n_eval_episodes: 1      # deterministic, so one episode is representative
   deterministic: true
-  pole_time_s: 64.3       # red_bull_ring pole; lap time logged vs this and 2x this
+  # pole derives from configs/track/red_bull_ring.yaml (pole_time_s: 64.3) — single source of
+  # truth. train.py falls back to cfg.track.pole_time_s; set eval.pole_time_s only to override.
   video_fps: 20           # mp4 frame rate (matches control_hz)
   record_video: true      # eval renders an mp4 via render/renderer.py
 

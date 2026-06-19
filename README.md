@@ -6,7 +6,16 @@ You watch from directly above. The whole circuit fits on screen, drawn faithfull
 
 ## Status
 
-Early stage — design complete, build starting. See the planning docs:
+**Phases 1–3b complete and merged.** A single PPO agent learns to lap a real circuit
+(Red Bull Ring) on the dynamic physics with the grip pipeline (tires, weather, surface), and
+its lap time is benchmarked against the real pole. Built so far: the web app (manual drive /
+watch live / replay), the offline track pipeline with real 2026 circuits cached under
+`data/tracks/`, the single-agent training core (PPO, checkpoint/resume, curriculum, W&B), and
+the kinematic→dynamic physics swap behind one interface.
+
+**Next:** Phase 4 — one track-agnostic policy across the whole calendar. Multi-car racing
+(overtaking, defending) is Phase 5–6 and not yet built; the hero paragraph above is the end
+goal, not the current feature set. See the planning docs:
 
 - **[Vision](.claude/PROJECT_VISION.md)** — what this is and why.
 - **[Technical Design](.claude/TECHNICAL_DESIGN.md)** — the authoritative engineering spec: stack, physics, env contract, reward design, and the phased build order.
@@ -47,4 +56,3 @@ Then open the localhost URL that Vite prints. Drive the oval with the arrows or 
 
 Python 3.10+ · NumPy · Gymnasium / PettingZoo / SuperSuit · Stable-Baselines3 (PPO) · PyTorch · FastF1 · SciPy · FastAPI / uvicorn · Vite / TypeScript / Canvas 2D · Pygame + imageio (headless eval clips) · Weights & Biases · OmegaConf · Ruff · Pytest.
 
-> Develop locally with Claude Code, push to GitHub; training runs on Colab/Kaggle GPUs that clone this repo. See the [technical design](.claude/TECHNICAL_DESIGN.md) for the full rationale behind every choice.

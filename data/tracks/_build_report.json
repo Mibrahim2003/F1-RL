@@ -204,5 +204,18 @@
     "official_length_m": 5451.0,
     "points": 1792,
     "source": "fastf1"
+  },
+  "silverstone": {
+    "country": "Great Britain",
+    "id": "silverstone",
+    "length_error": 0.0068,
+    "length_m": 5851.1,
+    "low_confidence": true,
+    "notes": [
+      "self-intersecting asphalt edge"
+    ],
+    "official_length_m": 5891.0,
+    "points": 1951,
+    "source": "fastf1"
   }
 }

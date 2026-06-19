@@ -8,8 +8,11 @@ The whole realism stack collapses to one scalar::
 That scalar gates the friction circle in the dynamic model. Adding a realism feature means
 writing one factor here, not touching the physics core. This module is **pure**: no
 ``Track``, no torch, no gym — so both the env and the live ``SimLoop`` import the same
-tables and agree on grip. SI-unitless multipliers; ``mu_base`` is the dry-asphalt friction
-coefficient. ``compound`` indices match :class:`~f1rl.physics.base.CarState`:
+tables and agree on grip. SI-unitless multipliers; ``mu_base`` is the **effective base-grip
+coefficient** — it lumps mechanical tire grip with a baseline aero contribution and is
+calibrated per car so a clean optimal lap lands near the real pole. It is **not** a literal
+tire-road friction value and routinely calibrates above one (see TECHNICAL_DESIGN §4).
+``compound`` indices match :class:`~f1rl.physics.base.CarState`:
 ``0 soft, 1 medium, 2 hard, 3 intermediate, 4 wet``.
 """
 
@@ -37,7 +40,11 @@ _DEFAULT_SURFACE = {"asphalt": 1.0, "kerb": 0.9, "grass": 0.4, "gravel": 0.3}
 
 @dataclass(frozen=True)
 class TireParams:
-    """Per-compound grip and wear falloff tables, plus the base friction coefficient."""
+    """Per-compound grip and wear falloff tables, plus the effective base-grip coefficient.
+
+    ``mu_base`` is a lumped, calibrated grip coefficient, not a literal road friction value —
+    see the module docstring and TECHNICAL_DESIGN §4.
+    """
 
     mu_base: float = _DEFAULT_MU_BASE
     compound_grip: tuple[float, ...] = _DEFAULT_COMPOUND_GRIP
