@@ -20,12 +20,15 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 @dataclass(frozen=True)
 class CurriculumStage:
-    """One curriculum stage: conditions applied from ``start_step`` onward."""
+    """One curriculum stage: conditions (and Phase-4 circuit pool) from ``start_step`` onward."""
 
     start_step: int
     mu_base: float | None = None
     wear_rate: float | None = None
     weather: str | None = None
+    # Phase 4: the active circuit set from this step on. ``None`` => leave the pool unchanged;
+    # an empty list => the full configured pool (widen). Tuple for the frozen dataclass.
+    circuits: tuple[str, ...] | None = None
 
 
 def parse_stages(cfg: Any) -> list[CurriculumStage]:
@@ -43,12 +46,16 @@ def parse_stages(cfg: Any) -> list[CurriculumStage]:
         mu = sget("mu_base", None)
         wear = sget("wear_rate", None)
         weather = sget("weather", None)
+        # Phase 4: a `circuits` key (even an empty list) means "set the pool"; absent => None.
+        circuits = sget("circuits", None)
+        circuits = None if circuits is None else tuple(str(c) for c in circuits)
         stages.append(
             CurriculumStage(
                 start_step=int(sget("start_step", 0)),
                 mu_base=None if mu is None else float(mu),
                 wear_rate=None if wear is None else float(wear),
                 weather=None if weather is None else str(weather),
+                circuits=circuits,
             )
         )
     stages.sort(key=lambda st: st.start_step)
@@ -98,16 +105,23 @@ class CurriculumCallback(BaseCallback):
             wear_rate=stage.wear_rate,
             weather=stage.weather,
         )
+        # Phase 4: widen/narrow the active circuit pool when the stage sets `circuits`
+        # (None => leave it; [] => the full configured pool). Sampling-side only, no obs change.
+        if stage.circuits is not None:
+            self.training_env.env_method("set_track_pool", circuits=list(stage.circuits))
         nan = float("nan")
+        n_circuits = float(len(stage.circuits)) if stage.circuits is not None else nan
         payload = {
             "curriculum/stage_start_step": float(stage.start_step),
             "curriculum/mu_base": float(stage.mu_base) if stage.mu_base is not None else nan,
             "curriculum/wear_rate": float(stage.wear_rate) if stage.wear_rate is not None else nan,
+            "curriculum/n_circuits": n_circuits,
         }
         if self.run_logger is not None:
             self.run_logger.log(payload, step=int(self.num_timesteps))
         if self.verbose:
             print(
                 f"[curriculum] step={self.num_timesteps} -> stage@{stage.start_step} "
-                f"mu_base={stage.mu_base} wear_rate={stage.wear_rate} weather={stage.weather}"
+                f"mu_base={stage.mu_base} wear_rate={stage.wear_rate} weather={stage.weather} "
+                f"circuits={list(stage.circuits) if stage.circuits is not None else 'unchanged'}"
             )

@@ -326,6 +326,51 @@ def test_sample_curvature_ahead_matches_track_curvature_here(track):
     assert val == pytest.approx(float(track.curvature[idx]), abs=5e-3)
 
 
+# --- Phase 4: track-agnostic lock (no absolute position; generalizes across the calendar) ---
+
+
+def test_observation_is_translation_invariant(track, cfg):
+    # The load-bearing Phase-4 property: NO absolute world position leaks into the observation.
+    # Translate the whole track AND the car by a large offset -> the observation is byte-equal
+    # (local/relative features only — spec §7, "this is what lets one policy generalize").
+    import dataclasses
+
+    import f1rl.env.observations as obs_mod
+
+    params = _params(cfg)
+    idx = len(track.centerline) // 3
+    state = _on_centerline_state(track, idx, speed=40.0)
+    obs_here = build_observation(track, state, params, _edge_cache(track))
+
+    shift = np.array([12345.0, -6789.0])
+    shifted_track = dataclasses.replace(track, centerline=track.centerline + shift)
+    shifted_cache = obs_mod.build_edge_cache(shifted_track)
+    shifted_state = dataclasses.replace(state, x=state.x + shift[0], y=state.y + shift[1])
+    obs_shifted = build_observation(shifted_track, shifted_state, params, shifted_cache)
+
+    np.testing.assert_allclose(obs_here, obs_shifted, atol=1e-5)
+
+
+def test_same_state_same_shape_and_in_bounds_on_two_circuits(cfg):
+    # The same relative car state projected on two DIFFERENT circuits yields same-shape,
+    # in-bounds vectors (Phase 4 lock: the observation looks valid on every circuit).
+    from f1rl.track.loader import load_track
+
+    params = _params(cfg)
+    space = observation_space()
+    checked = 0
+    for tid in ("red_bull_ring", "monza", "catalunya"):
+        if not (_TRACKS_DIR / f"{tid}.npz").exists():
+            continue
+        t = load_track(tid, tracks_dir=_TRACKS_DIR)
+        st = _on_centerline_state(t, idx=len(t.centerline) // 4, speed=50.0)
+        obs = build_observation(t, st, params, _edge_cache(t))
+        assert obs.shape == (22,)
+        assert space.contains(obs.astype(space.dtype)), tid
+        checked += 1
+    assert checked >= 2  # the lock is meaningful only across multiple circuits
+
+
 def test_speed_norm_increases_with_speed(track, cfg):
     # speed_norm = vx / ref_speed: monotone in speed, ~0 at rest (spec §7).
     params = _params(cfg)

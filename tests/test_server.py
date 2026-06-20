@@ -272,6 +272,40 @@ def test_ws_policy_autopilot_roundtrip(tmp_path):
         assert ev["source"] == "autopilot"
 
 
+# ----- Phase 4: calendar lap-time table result view --------------------------------------
+
+
+def test_api_calendar_404_when_absent(tmp_path):
+    cfg = load_config("default")
+    cfg.server.calendar_path = str(tmp_path / "nope.json")
+    with TestClient(create_app(cfg)) as client:
+        assert client.get("/api/calendar").status_code == 404
+
+
+def test_api_calendar_serves_saved_table(tmp_path):
+    table = {
+        "rows": [
+            {
+                "circuit": "monza",
+                "best_lap_time": 81.0,
+                "pole_time_s": 79.8,
+                "delta_to_pole": 1.2,
+                "beat_2x_pole_rate": 1.0,
+                "pole_missing": False,
+            }
+        ],
+        "aggregates": {"n_circuits": 1, "n_completed": 1},
+    }
+    path = tmp_path / "calendar_benchmark.json"
+    path.write_text(json.dumps(table), encoding="utf-8")
+    cfg = load_config("default")
+    cfg.server.calendar_path = str(path)
+    with TestClient(create_app(cfg)) as client:
+        data = client.get("/api/calendar").json()
+        assert data["rows"][0]["circuit"] == "monza"
+        assert data["aggregates"]["n_circuits"] == 1
+
+
 def test_ws_policy_bad_checkpoint_falls_back(tmp_path):
     # A missing/unknown checkpoint id must surface policy_error, never crash the socket.
     with _client_with_checkpoints(tmp_path) as client, client.websocket_connect("/ws/sim") as ws:

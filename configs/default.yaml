@@ -7,6 +7,16 @@ seed: 42
 
 track_id: oval  # selects configs/track/<track_id>.yaml, merged in under `track:`
 
+# --- Phase 4: circuit pool (per-episode sampling). Empty pool => single-track_id fallback ---
+# The env samples one circuit per reset from `pool` (built data/tracks/<id>.npz ids only) using
+# the env RNG, so the draw is reproducible from the run seed. Each id's pole is resolved from
+# its configs/track/<id>.yaml. Default empty => Phase 3b single-circuit behavior preserved.
+circuits:
+  pool: []                 # e.g. [red_bull_ring, monza, catalunya]; [] => use track_id only
+  sampling: uniform        # uniform | weighted
+  weights: null            # optional {id: w} for weighted sampling; null => uniform
+  pin_per_worker: false    # fallback: pin each worker to one drawn pool circuit for its life
+
 sim:
   control_hz: 20          # control step rate (dt_control = 1/20 = 0.05 s)
   substeps: 5             # physics substeps per control step
@@ -39,6 +49,7 @@ server:
   recordings_dir: "recordings"
   tracks_dir: "data/tracks"   # cached real-circuit .npz files (built offline)
   checkpoints_dir: "runs"     # root scanned for trained checkpoints (watch-live policy picker)
+  calendar_path: "out/calendar_benchmark.json"  # Phase 4 lap-time-vs-pole table (result view)
 
 # --- Observation (OBS_VERSION = 2, length 22) -----------------------------------------
 # These keys parameterize the v1 slice (0-14); the v2 tail (wear, compound one-hot, grip)

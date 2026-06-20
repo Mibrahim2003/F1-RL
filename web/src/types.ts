@@ -195,3 +195,33 @@ export interface RecordingSummary {
   created: string;
   frames: number;
 }
+
+/** One circuit's row in the Phase 4 calendar table (GET /api/calendar). */
+export interface CalendarRow {
+  circuit: string;
+  best_lap_time: number; // NaN when no clean lap was completed
+  pole_time_s: number;
+  delta_to_pole: number; // best_lap - pole; NaN when no lap / pole missing
+  beat_pole_rate: number;
+  beat_2x_pole_rate: number;
+  off_track_count: number;
+  completed_laps: number;
+  pole_missing: boolean; // true => the circuit has no pole; skip its delta
+}
+
+/** Pool-level aggregates across the calendar (poles missing / NaN laps skipped). */
+export interface CalendarAggregates {
+  n_circuits: number;
+  n_completed: number;
+  mean_delta_to_pole: number;
+  worst_delta_to_pole: number;
+  worst_circuit: string | null;
+  beat_pole_rate: number;
+  beat_2x_pole_rate: number;
+}
+
+/** The saved calendar lap-time-vs-pole table (the Phase 4 result view). */
+export interface CalendarTable {
+  rows: CalendarRow[];
+  aggregates: CalendarAggregates;
+}
