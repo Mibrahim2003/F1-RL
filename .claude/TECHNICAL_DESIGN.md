@@ -287,6 +287,13 @@ Single agent:
 - Must pass `gymnasium.utils.env_checker.check_env`. A test enforces this.
 - `step` never renders. The recorder logs per-step state for offline video.
 
+Circuit pool, Phase 4 (one car on many circuits):
+
+- The single bound track becomes a **config-driven circuit pool** (`env/pool.py` `CircuitPool`). A `circuits:` config block (`pool: [ids]`, `sampling: uniform|weighted`, `weights`, `pin_per_worker`) lists built `.npz` ids; an empty/absent pool falls back to the single `track_id`, reproducing the Phase 3b one-circuit behavior exactly.
+- Each pool id is loaded and precomputed **once** per worker (`Track` + `EdgeCache` + `LapTimer` + resolved pole). `reset` draws one id from `self.np_random` (reproducible from the seed; each worker draws independently) and rebinds `self.track`/`self.edge_cache`/`self.lap_timer`/`self.track_id` + the active pole together — the per-reset cost is a lookup, never a rebuild. `reset`/`step` `info` carry `circuit_id` and `pole_time_s`. No `reset`/`step` signature change; **the observation is unchanged (ObservationV2, length 22, `OBS_VERSION = 2`)**, so the Phase 3b checkpoint warm-starts.
+- **Per-circuit pole resolves from `configs/track/<id>.yaml` (`pole_time_s`)**, never from the geometry `.npz`; a missing/non-positive pole is flagged `pole_missing` and its delta is skipped (never divided by zero). The resolver is runtime-safe (YAML only, no FastF1, no network).
+- `set_track_pool(circuits)` — env method mirroring `apply_conditions`: narrows/widens the **active** sampling set from the next `reset` (validates ids are in the built pool), never rebuilds. The curriculum calls it via `VecEnv.env_method` to widen the pool easy → full calendar; sampling-side only, no obs change, no mid-run retrain.
+
 Multi agent, racing phase:
 
 - `RacingParallelEnv(pettingzoo.ParallelEnv)`. All cars step at once. Cars are homogeneous, same observation and action structure.
@@ -390,10 +397,11 @@ f1-rl/
       app.py                    # FastAPI app: WS /ws/sim, GET /track, GET /recordings, policies
       messages.py               # Pydantic client/server message models
     env/
-      single_agent.py           # RacingEnv
+      single_agent.py           # RacingEnv (samples a circuit per reset, Phase 4)
       observations.py           # ObservationV2 builder (length 22)
       rewards.py                # reward_v1 / reward_v2 (progress core)
       conditions.py             # weather/surface state + grip provider
+      pool.py                   # CircuitPool: per-id Track/EdgeCache/LapTimer/pole (Phase 4)
       factory.py                # make_vec_env (SB3 VecNormalize stack)
       multi_agent.py            # RacingParallelEnv  (planned, Phase 5)
     render/
@@ -403,7 +411,8 @@ f1-rl/
       evaluate.py               # deterministic eval episode + metrics + clip
       callbacks.py              # checkpoint, eval video, wandb
       checkpointing.py          # save/load + obs-version/action-shape validation
-      curriculum.py             # CurriculumCallback (conditions by timestep)
+      curriculum.py             # CurriculumCallback (conditions + circuit pool by timestep)
+      calendar_benchmark.py     # lap-time-vs-pole table across the pool (Phase 4 artifact)
       benchmark.py              # steps-per-second sweep
       calibrate.py              # tune grip/engine/brake so optimal lap ~ pole
       wandb_logger.py           # W&B with local-CSV fallback
@@ -417,12 +426,13 @@ f1-rl/
   tests/                        # pytest: env_checker, physics (kinematic+dynamic), grip,
                                 # obs, rewards, termination, track build/oval, timing,
                                 # recorder, config, seeding, checkpoint, curriculum, server,
-                                # smoke-train (kinematic+dynamic), lap-benchmark
+                                # smoke-train (kinematic+dynamic), lap-benchmark,
+                                # circuit-pool, env-sampling, calendar-benchmark (Phase 4)
 ```
 
 The interactive app is split across the top-level `web/` frontend and two Python packages: `server/` (the FastAPI app and its message models) and `sim/` (the fixed-step loop, lap timing, the trajectory recorder, and the centerline autopilot for watch-live). The `recorder.py` lives under `sim/` because the recorded-trajectory JSON it produces is the shared interchange across live sim, replay, and eval clips. `render/renderer.py` stays under the package as the offscreen eval-clip renderer used by training only; it is never imported by the app or the training hot path.
 
-The tree reflects the repo **as built through Phase 3b**; entries tagged `(planned, Phase 5)`
+The tree reflects the repo **as built through Phase 4**; entries tagged `(planned, Phase 5)`
 (`env/multi_agent.py`, `train/selfplay.py`) do not exist yet. Eval-clip rendering is invoked
 through `train/evaluate.py --video` (there is no separate `scripts/render_episode.py`), and
 there is no `notebooks/` directory yet — the Colab/Kaggle path clones the repo and runs
@@ -455,7 +465,7 @@ Phase 2, tracks and the track configuration UI. Build the offline FastF1 pipelin
 
 Phase 3, one car on one circuit. Drop an AI car on a configured circuit. At first it runs on an untrained policy and drifts, spins, and loses the track while you watch in the app. Then add observations v1, rewards v1, PPO training with checkpoint and resume, and Weights and Biases. Pull checkpoints and run the car live in the app to watch it improve. Once the first clean laps appear, upgrade to the dynamic physics with the grip pipeline, tires, and weather, swapped in behind the interface, then retrain. Benchmark the lap time against the pole. Artifact: a trained agent lapping one real circuit with realistic physics and a lap-time score against the real pole.
 
-Phase 4, one car on many circuits. Confirm the observations are fully track-agnostic, then sample a different circuit each episode so one policy handles every track. Artifact: one policy driving every circuit, with a lap-time table against the pole per circuit.
+Phase 4, one car on many circuits. Confirm the observations are fully track-agnostic, then sample a different circuit each episode so one policy handles every track. Artifact: one policy driving every circuit, with a lap-time table against the pole per circuit. As-built contracts: the `circuits:` pool config block and per-episode sampling (§10 circuit pool); per-circuit pole from `configs/track/<id>.yaml`; the curriculum stage gains an optional `circuits:` list that `set_track_pool` widens to the full calendar; the lap-time table (`train/calendar_benchmark.py`, one row per circuit — achieved / pole / delta / 2×-pole flag) is saved as JSON+CSV under `out/` and served at `GET /api/calendar` for the result view (toggle with T). The checkpoint format is unchanged (`obs_version` stays 2 → the Phase 3b checkpoint warm-starts; `--resume` continues the timestep count); `meta.json` `circuit_id` records the pool descriptor (e.g. `"calendar"`).
 
 Phase 5, many cars on track. Add the multi-agent env on PettingZoo with shared-policy self-play, and put the full field on track with no racing rules yet. Scale from 2 cars to 4 to the full 22. Artifact: a grid lapping a circuit together in the app.
 

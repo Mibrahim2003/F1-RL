@@ -1,0 +1,199 @@
+# calendar_dynamic — Phase 4 training run: ONE PPO policy learns the whole calendar. Same
+# DYNAMIC physics + grip pipeline + ObservationV2 (length 22) + reward_v2 as rbr_dynamic; the
+# only change is a CIRCUIT POOL sampled per episode and a curriculum that WIDENS that pool from
+# a few circuits to the full calendar. The observation is UNCHANGED (OBS_VERSION = 2), so this
+# warm-starts the Phase 3b checkpoint instead of retraining from scratch:
+#
+#   .venv/Scripts/python.exe -m f1rl.train.train --config calendar_dynamic \
+#       --resume runs/<rbr_dynamic_run>/checkpoints/best
+#
+# Lap-time table vs the pole per circuit (the phase artifact):
+#   .venv/Scripts/python.exe -m f1rl.train.calendar_benchmark \
+#       --checkpoint runs/<run>/checkpoints/best --config calendar_dynamic --episodes 2
+#
+# This file IS the source of truth for the run: every hyperparameter, physics constant, grip
+# table, reward weight, obs parameter, env limit, pool id, and curriculum stage lives here —
+# never in logic (CLAUDE.md rule). SI units throughout.
+
+seed: 42
+
+# track_id is the eval/video circuit and the single-circuit fallback; it must be in the pool so
+# its merged cfg.track (pole 64.3) resolves for the eval callback and the resume path.
+track_id: red_bull_ring
+
+# --- Phase 4: the circuit pool (built data/tracks/<id>.npz ids only) -------------------
+# The env loads EVERY pool id once per worker (Track + edge cache + lap timer + pole) and draws
+# one per reset from the env RNG. The curriculum below narrows the ACTIVE draw set over time; the
+# full pool is what the calendar benchmark sweeps. RAM scales with len(pool) x n_envs.
+circuits:
+  pool:
+    - red_bull_ring
+    - monza
+    - catalunya
+    - silverstone
+    - bahrain
+    - cota
+    - hungaroring
+    - interlagos
+    - albert_park
+    - baku
+    - jeddah
+    - las_vegas
+    - lusail
+    - marina_bay
+    - mexico_city
+    - miami
+    - monaco
+    - montreal
+    - shanghai
+  sampling: uniform
+  weights: null
+  pin_per_worker: false
+
+# --- training device + parallelism ----------------------------------------------------
+device: cpu
+n_envs: 4
+total_timesteps: 6000000   # generalization needs more steps than one circuit; curriculum-spanned
+
+# --- PPO hyperparameters (Stable-Baselines3 MlpPolicy) --------------------------------
+ppo:
+  n_steps: 2048
+  batch_size: 256
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  ent_coef: 0.0
+  vf_coef: 0.5
+  learning_rate: 0.0003
+  clip_range: 0.2
+  max_grad_norm: 0.5
+
+# --- sim loop timing ------------------------------------------------------------------
+sim:
+  control_hz: 20
+  substeps: 5
+  dt_physics: 0.01
+  grip: 1.0
+
+# --- physics: DYNAMIC bicycle + friction circle (unchanged from Phase 3b) -------------
+physics:
+  model: dynamic
+  wheelbase: 3.6
+  mass: 798.0
+  max_steer_deg: 18.0
+  max_engine_force: 14500.0
+  max_brake_force: 29000.0
+  drag_coeff: 0.70
+  rolling_coeff: 0.015
+  yaw_inertia: 1200.0
+  cg_front_ratio: 0.54
+  cornering_stiffness_front: 180000.0
+  cornering_stiffness_rear: 200000.0
+  downforce_coeff: 6.5
+  wear_rate: 0.0
+  wear_slip_ref: 1.0
+  v_blend: 3.0
+  v_eps: 0.5
+
+# --- grip pipeline: tires / weather / surface (unchanged from Phase 3b) ---------------
+tires:
+  mu_base: 1.95
+  compound_grip: [1.00, 0.97, 0.94, 0.88, 0.82]
+  compound_wear_falloff: [0.30, 0.22, 0.16, 0.20, 0.20]
+  start_compound: 0
+
+weather:
+  condition: dry
+  dry_factor: 1.0
+  damp_factor: 0.8
+  wet_factor: 0.6
+  p_wet: 0.25
+
+surface:
+  asphalt: 1.0
+  kerb: 0.9
+  grass: 0.4
+  gravel: 0.3
+
+# --- curriculum: WIDEN the pool easy -> full calendar (plus the 3b condition ramp) ----
+# `circuits` sets the active draw set from this step on; [] (or absent) => the full pool.
+curriculum:
+  enabled: true
+  stages:
+    - start_step: 0            # warm-start the line on a couple wide, fast circuits, easy grip
+      circuits: [red_bull_ring, monza]
+      mu_base: 2.30
+      wear_rate: 0.0
+      weather: dry
+    - start_step: 1000000      # widen to a mid set, nominal grip
+      circuits: [red_bull_ring, monza, catalunya, silverstone, bahrain, cota]
+      mu_base: 1.95
+      wear_rate: 0.0
+      weather: dry
+    - start_step: 3000000      # full calendar
+      circuits: []             # [] => the full configured pool
+      mu_base: 1.95
+      wear_rate: 0.0
+      weather: dry
+    - start_step: 4500000      # full calendar + tire wear + sampled weather
+      circuits: []
+      mu_base: 1.95
+      wear_rate: 0.02
+      weather: sampled
+
+# --- ObservationV2 (OBS_VERSION = 2, length 22) — UNCHANGED ---------------------------
+obs:
+  ref_speed: 92.0
+  lookahead_m: [10, 25, 50, 100, 150]
+  beam_angles_deg: [-90, -60, -30, 0, 30, 60, 90]
+  beam_max: 60.0
+  curvature_scale: 50.0
+
+# --- RewardV2 — unchanged -------------------------------------------------------------
+reward:
+  version: 2
+  w_progress: 1.0
+  w_offtrack: 1.0
+  w_step: 0.05
+  w_reverse: 2.0
+  offtrack_soft_m: 2.0
+  offtrack_exp: 2.0
+  w_slip: 0.0
+  slip_threshold: 0.20
+
+# --- env limits / termination + VecNormalize knobs ------------------------------------
+env:
+  target_laps: 1
+  max_steps: 4000
+  offtrack_limit_m: 12.0
+  wrong_way_steps: 40
+  wrong_way_ds_m: -0.05
+  start_speed: 0.0
+  start_randomize: true
+  failure_reward: -10.0
+  norm_reward: true
+  clip_obs: 10.0
+  clip_reward: 10.0
+  norm_gamma: 0.99
+
+# --- eval / checkpoint cadence (in training steps) ------------------------------------
+eval:
+  eval_freq: 50000
+  n_eval_episodes: 1
+  deterministic: true
+  video_fps: 20
+  record_video: true
+
+checkpoint:
+  checkpoint_freq: 50000
+  keep_last_k: 3
+  keep_best: true
+  dir: checkpoints
+
+# --- Weights & Biases logging ---------------------------------------------------------
+wandb:
+  project: f1rl-phase4
+  entity: null
+  mode: online
+  group: calendar_dynamic
+  tags: [phase-4, calendar, dynamic, ppo, generalization]

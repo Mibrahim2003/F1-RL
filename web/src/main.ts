@@ -17,6 +17,7 @@ import { ReplayPlayer, fetchRecording, listRecordings } from "./replay/player.ts
 import { TrackSelector } from "./ui/selector.ts";
 import { ConfigPanel } from "./ui/config_panel.ts";
 import { PolicyPicker } from "./ui/policy_picker.ts";
+import { CalendarPanel } from "./ui/calendar.ts";
 import type { Meta, Mode, SimMode, StateFrame, SurfaceEdit, Track } from "./types.ts";
 
 const $ = (id: string): HTMLElement => {
@@ -54,6 +55,9 @@ const policyPicker = new PolicyPicker($("viewport"), {
   onAutopilot: () => socket.sendPolicy("autopilot"),
   onCheckpoint: (id) => socket.sendPolicy("checkpoint", id),
 });
+
+// Phase 4 result view: the lap-time-vs-pole table across the calendar (toggle with T).
+const calendar = new CalendarPanel($("viewport"));
 
 const keyboard = new Keyboard(
   (input) => socket.sendInput(input.steer, input.throttle, input.brake, false),
@@ -130,8 +134,8 @@ async function switchTrack(id: string): Promise<void> {
     renderer.clearPoses();
     hud.reset();
     updateCircuitChip(track);
-    // The server drops any active policy back to the autopilot on a circuit switch.
-    policyPicker.reset();
+    // Phase 4: the server keeps the active checkpoint driving the new circuit (track-agnostic
+    // observation) and re-confirms it with a policy_changed event — so the picker is left as is.
     store.set({ trackId: id, lowConfidence: track.low_confidence, loadingTrack: false });
     if (store.get().mode === "configure") openConfigPanel();
   } catch {
@@ -441,6 +445,9 @@ window.addEventListener("keydown", (e) => {
   } else if (e.code === "KeyG") {
     const next: GlyphStyle = renderer.getGlyph() === "rect" ? "arrow" : "rect";
     renderer.setGlyph(next);
+  } else if (e.code === "KeyT") {
+    // Phase 4 result view: the calendar lap-time-vs-pole table.
+    calendar.toggle();
   }
 });
 

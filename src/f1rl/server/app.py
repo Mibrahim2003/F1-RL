@@ -137,6 +137,7 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
     recordings_dir = Path(cfg.server.recordings_dir)
     tracks_dir = Path(cfg.server.get("tracks_dir", str(DEFAULT_TRACKS_DIR)))
     checkpoints_dir = Path(cfg.server.get("checkpoints_dir", "runs"))
+    calendar_path = Path(cfg.server.get("calendar_path", "out/calendar_benchmark.json"))
 
     def track_meta(track_id: str) -> tuple[Track, float, int]:
         """Load a circuit + its pace meta. Raises ``FileNotFoundError`` if not built."""
@@ -167,6 +168,20 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
     def get_checkpoints() -> dict[str, Any]:
         """List trained checkpoints under the configured root, for the watch-live picker."""
         return {"checkpoints": scan_checkpoints(checkpoints_dir)}
+
+    @app.get("/api/calendar")
+    def get_calendar() -> dict[str, Any]:
+        """Serve the saved calendar lap-time-vs-pole table (Phase 4 result view).
+
+        Returns the JSON written by ``f1rl.train.calendar_benchmark``; 404 until it is
+        generated (the result view then shows a friendly "run the benchmark" note).
+        """
+        if not calendar_path.is_file():
+            raise HTTPException(status_code=404, detail="no calendar benchmark table yet")
+        try:
+            return json.loads(calendar_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise HTTPException(status_code=500, detail=f"unreadable calendar table: {e}") from e
 
     @app.get("/track/{track_id}")
     def get_track(track_id: str) -> dict[str, Any]:
@@ -243,8 +258,9 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
             # A fresh grip provider per circuit (dry, fresh tires); shared with the env's logic.
             conditions = Conditions.from_config(cfg) if use_pipeline else None
             sim.loop = SimLoop(physics, tk, sim_cfg, pole, laps, conditions)
-            # Switching circuits drops any active policy back to the centerline autopilot:
-            # a checkpoint may have been trained on a different circuit (re-pick to re-apply).
+            # Default the new circuit to the centerline autopilot; the caller re-applies any
+            # active checkpoint on the new track (Phase 4: the observation is track-agnostic, so
+            # one policy drives every circuit), so a failed re-apply still leaves a working driver.
             sim.autopilot = CenterlineAutopilot(tk, max_steer)
             sim.policy_id = None
             sim.track_id = track_id
@@ -329,8 +345,12 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                 elif isinstance(msg, ModeMessage):
                     session.mode = msg.mode
                 elif isinstance(msg, TrackMessage):
+                    prev_policy = sim.policy_id  # keep the active checkpoint across the switch
                     try:
                         set_track(msg.id)
+                    except FileNotFoundError:
+                        await ws.send_json({"type": "event", "event": "track_error", "id": msg.id})
+                    else:
                         await ws.send_json(
                             {
                                 "type": "event",
@@ -342,8 +362,11 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                                 "pole_str": _format_lap_time(sim.pole_time_s),
                             }
                         )
-                    except FileNotFoundError:
-                        await ws.send_json({"type": "event", "event": "track_error", "id": msg.id})
+                        # Phase 4: the same checkpoint drives any built circuit (track-agnostic
+                        # observation), so rebind it on the newly loaded track. apply_policy
+                        # falls back to the autopilot + a policy_error if the reload fails.
+                        if prev_policy is not None:
+                            await apply_policy(PolicyMessage(source="checkpoint", id=prev_policy))
                 elif isinstance(msg, PolicyMessage):
                     await apply_policy(msg)
                 elif isinstance(msg, WeatherMessage):

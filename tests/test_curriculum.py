@@ -19,12 +19,19 @@ from f1rl.train.curriculum import (
     active_stage,
     parse_stages,
 )
+from f1rl.utils.config import load_config
 
 _TRACKS_DIR = Path(__file__).resolve().parents[1] / "data" / "tracks"
+_CONFIG_ROOT = Path(__file__).resolve().parents[1] / "configs"
 pytestmark = pytest.mark.skipif(
     not (_TRACKS_DIR / "red_bull_ring.npz").exists(),
     reason="cached track 'red_bull_ring' not found in data/tracks/",
 )
+
+
+def _calendar_cfg():
+    """The Phase-4 calendar experiment config (pool-widening curriculum stages)."""
+    return load_config("experiment/calendar_dynamic", config_root=_CONFIG_ROOT)
 
 
 def test_parse_stages_reads_and_sorts(dyn_cfg):
@@ -102,6 +109,45 @@ def test_callback_pushes_again_only_on_stage_change(dyn_cfg):
 
 
 # --- env-side hook ----------------------------------------------------------------------
+
+
+# --- Phase 4: pool-widening over the curriculum ----------------------------------------
+
+
+def test_parse_stages_reads_circuits():
+    stages = parse_stages(_calendar_cfg())
+    assert stages[0].circuits == ("red_bull_ring", "monza")  # starter pool
+    assert stages[2].circuits == ()  # empty list => full-pool sentinel (not None)
+    assert stages[2].circuits is not None
+
+
+def test_stage_without_circuits_leaves_pool_untouched(dyn_cfg):
+    # rbr_dynamic sets no `circuits` on its stages -> None -> the pool is never pushed.
+    stages = parse_stages(dyn_cfg)
+    assert stages and all(s.circuits is None for s in stages)
+
+
+def test_callback_pushes_set_track_pool_for_starter_stage():
+    cb = CurriculumCallback(_calendar_cfg(), verbose=0)
+    stub = _StubVecEnv()
+    cb.model = _StubModel(stub)
+    cb.num_timesteps = 0
+    cb._maybe_apply(force=True)
+
+    pool_calls = [kwargs for name, kwargs in stub.calls if name == "set_track_pool"]
+    assert pool_calls, "starter stage did not push the active circuit pool"
+    assert pool_calls[-1]["circuits"] == ["red_bull_ring", "monza"]
+
+
+def test_callback_full_pool_when_stage_circuits_empty():
+    cb = CurriculumCallback(_calendar_cfg(), verbose=0)
+    stub = _StubVecEnv()
+    cb.model = _StubModel(stub)
+    cb.num_timesteps = 3_000_000  # the full-calendar stage (circuits: [])
+    cb._maybe_apply(force=True)
+
+    pool_calls = [kwargs for name, kwargs in stub.calls if name == "set_track_pool"]
+    assert pool_calls[-1]["circuits"] == []  # [] => full configured pool
 
 
 def test_apply_conditions_changes_grip_and_wear(dyn_cfg):

@@ -12,11 +12,13 @@ develop-eggs/
 wheels/
 pip-wheel-metadata/
 
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
+# Virtual environments — anchored to the repo root so they only catch a top-level venv dir.
+# Unanchored "env/" matched the source package src/f1rl/env/ (case-insensitively on Windows),
+# which silently dropped the whole env package from every commit. Keep these anchored (leading /).
+/.venv/
+/venv/
+/env/
+/ENV/
 
 # Tooling caches
 .pytest_cache/
