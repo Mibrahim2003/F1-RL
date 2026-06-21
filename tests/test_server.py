@@ -97,6 +97,46 @@ def test_ws_input_clamping_no_crash():
             assert frame["type"] == "state"
 
 
+def _recv_state_with_cars(ws, n_cars: int, max_n: int = 80) -> dict:
+    for _ in range(max_n):
+        msg = ws.receive_json()
+        if msg.get("type") == "state" and len(msg.get("cars", [])) == n_cars:
+            return msg
+    raise AssertionError(f"no state frame with {n_cars} cars received")
+
+
+def test_ws_field_streams_every_car():
+    # Phase 5: switch the watch session to a field of N cars driven by one shared pilot.
+    with _client() as client, client.websocket_connect("/ws/sim") as ws:
+        ws.send_json({"type": "mode", "mode": "watch"})
+        ws.send_json({"type": "field", "n_agents": 4})
+        ws.send_json({"type": "control", "action": "play"})
+        frame = _recv_state_with_cars(ws, 4)
+        cars = frame["cars"]
+        ids = [c["id"] for c in cars]
+        assert ids == ["car_0", "car_1", "car_2", "car_3"]
+        # Distinct, non-overlapping grid slots; each car has its own telemetry + a track gap.
+        positions = {(round(c["x"], 1), round(c["y"], 1)) for c in cars}
+        assert len(positions) == 4
+        assert all("gap_m" in c and "telemetry" in c for c in cars)
+        # Backward compatible: the legacy single-car keys still mirror the leader.
+        assert "car" in frame and "telemetry" in frame
+
+
+def test_ws_single_car_path_unchanged_with_cars_array():
+    # The one-car watch path still emits a one-element cars array AND the legacy car object.
+    with _client() as client, client.websocket_connect("/ws/sim") as ws:
+        ws.send_json({"type": "mode", "mode": "watch"})
+        ws.send_json({"type": "control", "action": "play"})
+        for _ in range(10):
+            frame = ws.receive_json()
+            if frame.get("type") == "state":
+                assert "car" in frame and frame.get("cars") and len(frame["cars"]) == 1
+                break
+        else:
+            raise AssertionError("no state frame received")
+
+
 def test_input_message_clamps_axes():
     msg = InputMessage(steer=5.0, throttle=9.0, brake=-2.0)
     assert msg.steer == 1.0

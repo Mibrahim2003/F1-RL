@@ -58,3 +58,52 @@ def test_validation_rejects_bad_structure(tmp_path):
 def test_validation_rejects_empty_frames():
     with pytest.raises(TrajectoryError):
         validate_trajectory({"meta": {"track_id": "oval", "dt": 0.05}, "frames": []})
+
+
+# ----- Phase 5: multi-car (field) recorder ----------------------------------------------
+
+
+def _car_entry(i, x):
+    return {
+        "id": f"car_{i}",
+        "team": i,
+        "x": x,
+        "y": 0.0,
+        "yaw": 0.0,
+        "speed": x,
+        "telemetry": {"speed_kmh": round(x * 3.6), "lap_time": 0.0, "progress": 0.0},
+    }
+
+
+def test_multi_car_record_save_load_roundtrip(tmp_path):
+    rec = TrajectoryRecorder(track_id="monza", dt=0.05, seed=7, n_agents=3)
+    for f in range(4):
+        rec.append_cars(f * 0.05, [_car_entry(i, float(f + i)) for i in range(3)])
+    path = rec.save(tmp_path / "field.json")
+
+    loaded = load_trajectory(path)
+    assert loaded["meta"]["n_agents"] == 3
+    assert len(loaded["frames"][0]["cars"]) == 3
+    assert loaded["frames"] == rec.frames
+
+
+def test_validation_accepts_multi_car_frame():
+    data = {
+        "meta": {"track_id": "x", "dt": 0.05},
+        "frames": [{"t": 0.0, "cars": [{"x": 1.0, "y": 0.0, "yaw": 0.0, "speed": 1.0}]}],
+    }
+    assert validate_trajectory(data) is data
+
+
+def test_validation_rejects_empty_cars_list():
+    with pytest.raises(TrajectoryError):
+        validate_trajectory(
+            {"meta": {"track_id": "x", "dt": 0.05}, "frames": [{"t": 0.0, "cars": []}]}
+        )
+
+
+def test_validation_rejects_car_missing_keys_in_multi_car_frame():
+    with pytest.raises(TrajectoryError):
+        validate_trajectory(
+            {"meta": {"track_id": "x", "dt": 0.05}, "frames": [{"t": 0.0, "cars": [{"x": 1.0}]}]}
+        )

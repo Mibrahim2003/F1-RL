@@ -19,9 +19,11 @@ dependencies = [
     "numpy",
     "scipy",
     "gymnasium",
-    "pettingzoo",
-    "supersuit",
-    "stable-baselines3",
+    # Multi-agent stack (Phase 5): pinned to the verified-working matrix. SuperSuit lags the
+    # Gymnasium API, so these three move together — bump them as a set, never individually.
+    "pettingzoo==1.26.1",
+    "supersuit==3.11.0",
+    "stable-baselines3==2.9.0",
     "torch>=2.2",
     "pygame>=2.5",
     "imageio>=2.34",

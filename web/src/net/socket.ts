@@ -115,6 +115,11 @@ export class SimSocket {
     this.send({ type: "record", action });
   }
 
+  /** Set the live field size (Phase 5 many-cars); >1 switches watch to the field view. */
+  sendField(n_agents: number): void {
+    this.send({ type: "field", n_agents });
+  }
+
   isOpen(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }

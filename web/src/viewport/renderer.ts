@@ -14,7 +14,22 @@
  */
 
 import { Camera } from "./camera.ts";
-import type { CarPose, Track } from "../types.ts";
+import type { CarEntry, CarPose, StateFrame, Track } from "../types.ts";
+
+// Team color palette for the field (render only; mirrors configs/default.yaml grid.team_colors).
+const TEAM_COLORS = [
+  "#e10600",
+  "#00d2be",
+  "#0600ef",
+  "#ff8700",
+  "#006f62",
+  "#2b4562",
+  "#900000",
+  "#005aff",
+  "#ffffff",
+  "#358c75",
+  "#c92d4b",
+];
 
 // Visual constants (mirror tokens.css viewport group).
 const C = {
@@ -76,6 +91,16 @@ export class Renderer {
   private prev: TimedPose | null = null;
   private curr: TimedPose | null = null;
   private interpMs = 50; // nominal gap between 20 Hz frames
+
+  // Phase 5 field: per-car interpolation buffers, keyed by car id.
+  private fieldMode = false;
+  private fieldCars = new Map<
+    string,
+    { prev: TimedPose | null; curr: TimedPose | null; team: number; gap: number }
+  >();
+  private fieldLastReceived = 0;
+  private fieldInterpMs = 50;
+  private fieldLastT: number | null = null;
 
   // debug
   private debugOn = false;
@@ -141,9 +166,67 @@ export class Renderer {
     this.lastReceived = performance.now();
   }
 
+  /** Feed a frame (single-car or field). A one-element `cars` array is the single-car path. */
+  pushFrame(frame: StateFrame): void {
+    if (frame.cars && frame.cars.length > 1) {
+      this.pushFieldCars(frame.t, frame.cars);
+      return;
+    }
+    this.fieldMode = false;
+    const c = frame.cars && frame.cars.length ? frame.cars[0] : frame.car;
+    if (c) this.pushPose(frame.t, { x: c.x, y: c.y, yaw: c.yaw, speed: c.speed });
+  }
+
+  /** Feed a multi-car field frame; updates per-car interpolation buffers. */
+  pushFieldCars(t: number, cars: CarEntry[]): void {
+    this.fieldMode = true;
+    const now = performance.now();
+    this.stateTimestamps.push(now);
+    if (this.stateTimestamps.length > 40) this.stateTimestamps.shift();
+    if (this.fieldLastT !== null) {
+      const gap = t - this.fieldLastT;
+      if (gap > 0 && gap < 1) this.fieldInterpMs = gap * 1000;
+    }
+    this.fieldLastT = t;
+    this.fieldLastReceived = now;
+
+    const seen = new Set<string>();
+    for (const c of cars) {
+      seen.add(c.id);
+      let buf = this.fieldCars.get(c.id);
+      if (!buf) {
+        buf = { prev: null, curr: null, team: c.team, gap: c.gap_m ?? 0 };
+        this.fieldCars.set(c.id, buf);
+      }
+      buf.team = c.team;
+      buf.gap = c.gap_m ?? 0;
+      buf.prev = buf.curr;
+      buf.curr = { t, pose: { x: c.x, y: c.y, yaw: c.yaw, speed: c.speed } };
+    }
+    // Drop cars no longer in the field (e.g. the field size shrank).
+    for (const id of [...this.fieldCars.keys()]) if (!seen.has(id)) this.fieldCars.delete(id);
+  }
+
+  /** Replace the whole field immediately without interpolation (replay scrub). */
+  setFieldImmediate(t: number, cars: CarEntry[]): void {
+    this.fieldMode = true;
+    this.fieldLastReceived = performance.now();
+    this.fieldLastT = t;
+    const seen = new Set<string>();
+    for (const c of cars) {
+      seen.add(c.id);
+      const tp: TimedPose = { t, pose: { x: c.x, y: c.y, yaw: c.yaw, speed: c.speed } };
+      this.fieldCars.set(c.id, { prev: tp, curr: tp, team: c.team, gap: c.gap_m ?? 0 });
+    }
+    for (const id of [...this.fieldCars.keys()]) if (!seen.has(id)) this.fieldCars.delete(id);
+  }
+
   clearPoses(): void {
     this.prev = null;
     this.curr = null;
+    this.fieldMode = false;
+    this.fieldCars.clear();
+    this.fieldLastT = null;
   }
 
   toggleDebug(): void {
@@ -173,24 +256,76 @@ export class Renderer {
   /** Draw a single frame. dtMs is the wall-clock delta since last frame. */
   render(now: number, dtMs: number): void {
     this.recordFrame(now);
-    const pose = this.interpolatedPose(now);
-    this.camera.updateFollow(pose ? { x: pose.x, y: pose.y } : null, dtMs);
-
     const ctx = this.ctx;
     // Clear in device space, then switch to the world→device matrix for everything else.
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.cssW, this.cssH);
 
+    if (this.fieldMode && this.fieldCars.size > 0) {
+      this.renderField(ctx, now, dtMs);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      return;
+    }
+
+    const pose = this.interpolatedPose(now);
+    this.camera.updateFollow(pose ? { x: pose.x, y: pose.y } : null, dtMs);
     if (this.track) {
       ctx.setTransform(...this.camera.viewMatrix(this.dpr));
       this.drawTrack(ctx);
       if (pose) {
-        this.drawCar(ctx, pose);
+        this.drawCar(ctx, pose, C.carBody, true);
         this.lastDrawnCar = pose;
       }
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
+
+  /** Render the whole field: every car colored by team, camera follows the leader. */
+  private renderField(ctx: CanvasRenderingContext2D, now: number, dtMs: number): void {
+    // Leader = the car with the smallest track-position gap.
+    let leaderGap = Infinity;
+    let leaderPose: CarPose | null = null;
+    const poses: { pose: CarPose; team: number; gap: number }[] = [];
+    for (const buf of this.fieldCars.values()) {
+      const pose = this.interpField(buf, now);
+      if (!pose) continue;
+      poses.push({ pose, team: buf.team, gap: buf.gap });
+      if (buf.gap < leaderGap) {
+        leaderGap = buf.gap;
+        leaderPose = pose;
+      }
+    }
+    this.camera.updateFollow(leaderPose ? { x: leaderPose.x, y: leaderPose.y } : null, dtMs);
+
+    if (this.track) {
+      ctx.setTransform(...this.camera.viewMatrix(this.dpr));
+      this.drawTrack(ctx);
+      for (const p of poses) {
+        const color = TEAM_COLORS[p.team % TEAM_COLORS.length];
+        this.drawCar(ctx, p.pose, color, p.pose === leaderPose);
+      }
+      this.lastDrawnCar = leaderPose;
+    }
+    // The field's timing tower is the HUD's HTML tower (driven from the state frame's cars[]).
+  }
+
+  private interpField(
+    buf: { prev: TimedPose | null; curr: TimedPose | null },
+    now: number,
+  ): CarPose | null {
+    if (!buf.curr) return null;
+    if (!buf.prev) return buf.curr.pose;
+    const a = Math.min(1, Math.max(0, (now - this.fieldLastReceived) / this.fieldInterpMs));
+    const p0 = buf.prev.pose;
+    const p1 = buf.curr.pose;
+    return {
+      x: p0.x + (p1.x - p0.x) * a,
+      y: p0.y + (p1.y - p0.y) * a,
+      yaw: p0.yaw + wrapAngle(p1.yaw - p0.yaw) * a,
+      speed: p0.speed + (p1.speed - p0.speed) * a,
+    };
+  }
+
 
   getDebugInfo(): DebugInfo {
     return {
@@ -352,7 +487,12 @@ export class Renderer {
 
   // ---------- car ----------
 
-  private drawCar(ctx: CanvasRenderingContext2D, pose: CarPose): void {
+  private drawCar(
+    ctx: CanvasRenderingContext2D,
+    pose: CarPose,
+    color: string = C.carBody,
+    halo = true,
+  ): void {
     const scale = this.camera.scale;
     // Real 5×2 m footprint, but never below ~9 px long so it stays visible when zoomed out.
     const len = Math.max(CAR_LENGTH_M, 9 / scale);
@@ -363,17 +503,19 @@ export class Renderer {
     ctx.translate(pose.x, pose.y);
     ctx.rotate(pose.yaw); // world is y-up; the view matrix's y-flip makes CCW read correctly
 
-    // featured-car halo
-    ctx.beginPath();
-    ctx.arc(0, 0, len * 0.95, 0, Math.PI * 2);
-    ctx.strokeStyle = C.halo;
-    ctx.globalAlpha = 0.4;
-    ctx.lineWidth = Math.max(px(2), len * 0.05);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
+    // featured-car halo (leader only in field mode)
+    if (halo) {
+      ctx.beginPath();
+      ctx.arc(0, 0, len * 0.95, 0, Math.PI * 2);
+      ctx.strokeStyle = C.halo;
+      ctx.globalAlpha = 0.4;
+      ctx.lineWidth = Math.max(px(2), len * 0.05);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
 
-    if (this.glyph === "arrow") this.drawArrowGlyph(ctx, len, px);
-    else this.drawRectGlyph(ctx, len, wid, px);
+    if (this.glyph === "arrow") this.drawArrowGlyph(ctx, len, px, color);
+    else this.drawRectGlyph(ctx, len, wid, px, color);
 
     ctx.restore();
   }
@@ -383,6 +525,7 @@ export class Renderer {
     len: number,
     wid: number,
     px: (n: number) => number,
+    color: string = C.carBody,
   ): void {
     const hl = len / 2;
     const hw = wid / 2;
@@ -393,7 +536,7 @@ export class Renderer {
     ctx.lineTo(-hl, hw);
     ctx.lineTo(hl * 0.6, hw);
     ctx.closePath();
-    ctx.fillStyle = C.carBody;
+    ctx.fillStyle = color;
     ctx.fill();
     ctx.strokeStyle = C.carStroke;
     ctx.lineWidth = Math.max(px(1), len * 0.03);
@@ -409,11 +552,12 @@ export class Renderer {
     ctx: CanvasRenderingContext2D,
     len: number,
     px: (n: number) => number,
+    color: string = C.carBody,
   ): void {
     const r = len * 0.42;
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
-    ctx.fillStyle = C.carBody;
+    ctx.fillStyle = color;
     ctx.fill();
     ctx.strokeStyle = C.carStroke;
     ctx.lineWidth = Math.max(px(1), len * 0.03);

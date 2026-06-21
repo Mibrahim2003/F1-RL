@@ -87,11 +87,22 @@ export interface Telemetry {
   weather?: "dry" | "damp" | "wet";
 }
 
+/** One car in a multi-car (field) frame; a single car is a one-element `cars` array. */
+export interface CarEntry extends CarPose {
+  id: string;
+  team: number; // index into the team color palette (render only)
+  gap_m?: number; // track-position gap behind the leader, meters (field frames)
+  telemetry: Partial<Telemetry> & { completed_laps?: number };
+}
+
 export interface StateFrame {
   type: "state";
   t: number;
-  car: CarPose;
-  telemetry: Telemetry;
+  // Legacy single-car keys (kept for backward compatibility; equal cars[leader]).
+  car?: CarPose;
+  telemetry?: Telemetry;
+  // Phase 5: the whole field (length 1 for a single car).
+  cars?: CarEntry[];
 }
 
 export interface EventMessage {
@@ -110,6 +121,8 @@ export interface EventMessage {
   message?: string;
   // weather_changed (Phase 3b live grip).
   condition?: "dry" | "damp" | "wet";
+  // field_changed (Phase 5 many-cars).
+  n_agents?: number;
 }
 
 export type ServerMessage = StateFrame | EventMessage;
@@ -161,6 +174,12 @@ export interface RecordMessage {
   action: "start" | "stop";
 }
 
+/** Set the live field size (Phase 5 many-cars); >1 switches watch to the field view. */
+export interface FieldMessage {
+  type: "field";
+  n_agents: number;
+}
+
 export type ClientMessage =
   | InputMessage
   | ModeMessage
@@ -168,7 +187,8 @@ export type ClientMessage =
   | RecordMessage
   | TrackMessage
   | PolicyMessage
-  | WeatherMessage;
+  | WeatherMessage
+  | FieldMessage;
 
 /** Catalog entry from GET /api/checkpoints (the watch-live policy picker source). */
 export interface CheckpointSummary {
@@ -178,15 +198,16 @@ export interface CheckpointSummary {
   obs_version: number;
 }
 
-/** Recording trajectory served by GET /recordings/{id}. */
+/** Recording trajectory served by GET /recordings/{id} (single-car or multi-car frames). */
 export interface RecordingFrame {
   t: number;
-  car: CarPose;
-  telemetry: Partial<Telemetry>;
+  car?: CarPose;
+  telemetry?: Partial<Telemetry>;
+  cars?: CarEntry[];
 }
 
 export interface Recording {
-  meta: { track_id: string; dt: number; seed: number; created: string };
+  meta: { track_id: string; dt: number; seed: number; created: string; n_agents?: number };
   frames: RecordingFrame[];
 }
 

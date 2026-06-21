@@ -6,7 +6,13 @@
 
 import type { Hud } from "../hud/telemetry.ts";
 import type { Renderer } from "../viewport/renderer.ts";
-import type { Recording, RecordingSummary, StateFrame, Telemetry } from "../types.ts";
+import type {
+  CarEntry,
+  Recording,
+  RecordingSummary,
+  StateFrame,
+  Telemetry,
+} from "../types.ts";
 
 const EMPTY_TELEMETRY: Telemetry = {
   speed_kmh: 0,
@@ -147,11 +153,35 @@ export class ReplayPlayer {
     this.rafScrub = f;
     const t = this.fractionToT(f);
     const { a, b, alpha } = this.bracket(t);
+
+    // Multi-car (field) frame: interpolate every car by id and render the whole field.
+    if (a.cars && a.cars.length) {
+      const bById = new Map((b.cars ?? []).map((c) => [c.id, c]));
+      const cars: CarEntry[] = a.cars.map((ca) => {
+        const cb = bById.get(ca.id) ?? ca;
+        return {
+          ...ca,
+          x: ca.x + (cb.x - ca.x) * alpha,
+          y: ca.y + (cb.y - ca.y) * alpha,
+          yaw: ca.yaw + wrapAngle(cb.yaw - ca.yaw) * alpha,
+          speed: ca.speed + (cb.speed - ca.speed) * alpha,
+        };
+      });
+      this.renderer.setFieldImmediate(t, cars);
+      const near = alpha < 0.5 ? a : b;
+      this.hud.update({ type: "state", t, cars: near.cars });
+      return;
+    }
+
+    // Single-car frame (legacy recordings).
+    const aCar = a.car;
+    const bCar = b.car ?? aCar;
+    if (!aCar || !bCar) return;
     const pose = {
-      x: a.car.x + (b.car.x - a.car.x) * alpha,
-      y: a.car.y + (b.car.y - a.car.y) * alpha,
-      yaw: a.car.yaw + wrapAngle(b.car.yaw - a.car.yaw) * alpha,
-      speed: a.car.speed + (b.car.speed - a.car.speed) * alpha,
+      x: aCar.x + (bCar.x - aCar.x) * alpha,
+      y: aCar.y + (bCar.y - aCar.y) * alpha,
+      yaw: aCar.yaw + wrapAngle(bCar.yaw - aCar.yaw) * alpha,
+      speed: aCar.speed + (bCar.speed - aCar.speed) * alpha,
     };
     this.renderer.setPoseImmediate(t, pose);
 

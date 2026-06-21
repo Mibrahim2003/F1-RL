@@ -13,6 +13,7 @@ Meta sidecar schema (every key required)::
       "circuit_id": str,             # cfg.track_id — resume on the right circuit
       "obs_version": int,            # OBS_VERSION; loader refuses a mismatch
       "action_shape": [int, ...],    # Box action shape; loader refuses a mismatch
+      "n_agents": int,               # Phase 5 field size the run trained on (1 = single-agent)
       "seed": int,                   # the run seed (recorded every run)
       "config_snapshot": dict,       # full resolved config, for reproducibility
       "sb3_version": str,            # stable_baselines3.__version__
@@ -108,11 +109,21 @@ def build_meta(
     action_space = getattr(model, "action_space", None)
     action_shape = list(getattr(action_space, "shape", EXPECTED_ACTION_SHAPE))
 
+    # Phase 5: the constant field size this run trained on (1 for the single-agent path). Not
+    # validated on resume — the per-agent obs/action spaces match across widths, so a
+    # smaller-field checkpoint warm-starts a larger-field run.
+    n_agents = 1
+    if isinstance(container, dict):
+        grid = container.get("grid")
+        if isinstance(grid, dict):
+            n_agents = int(grid.get("n_agents", 1) or 1)
+
     return {
         "total_timesteps": int(getattr(model, "num_timesteps", 0)),
         "circuit_id": str(circuit_id),
         "obs_version": int(OBS_VERSION),
         "action_shape": action_shape,
+        "n_agents": int(n_agents),
         "seed": int(seed),
         "config_snapshot": container,
         "sb3_version": str(sb3.__version__),
