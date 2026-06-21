@@ -30,6 +30,7 @@ from f1rl.env.conditions import Conditions
 from f1rl.physics import make_physics
 from f1rl.server.messages import (
     ControlMessage,
+    FieldMessage,
     InputMessage,
     ModeMessage,
     PolicyMessage,
@@ -40,7 +41,7 @@ from f1rl.server.messages import (
     parse_client_message,
 )
 from f1rl.sim.autopilot import CenterlineAutopilot
-from f1rl.sim.loop import SimConfig, SimLoop
+from f1rl.sim.loop import FieldSimLoop, SimConfig, SimLoop
 from f1rl.sim.policy_pilot import PolicyPilot
 from f1rl.sim.recorder import TrajectoryError, TrajectoryRecorder, load_trajectory
 from f1rl.track.loader import DEFAULT_TRACKS_DIR, list_tracks, load_track
@@ -138,6 +139,17 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
     tracks_dir = Path(cfg.server.get("tracks_dir", str(DEFAULT_TRACKS_DIR)))
     checkpoints_dir = Path(cfg.server.get("checkpoints_dir", "runs"))
     calendar_path = Path(cfg.server.get("calendar_path", "out/calendar_benchmark.json"))
+
+    # Phase 5: field (many-cars) layout from the grid block (render/placement only).
+    grid_node = cfg.get("grid") if hasattr(cfg, "get") else getattr(cfg, "grid", None)
+    grid_get = (
+        grid_node.get if grid_node is not None and hasattr(grid_node, "get") else (lambda k, d: d)
+    )
+    field_reset_mode = str(grid_get("reset_mode", "grid"))
+    field_spacing_m = float(grid_get("grid_spacing_m", 12.0))
+    field_lateral_m = float(grid_get("grid_lateral_m", 3.0))
+    _team_colors_cfg = grid_get("team_colors", None)
+    field_team_colors = tuple(str(c) for c in _team_colors_cfg) if _team_colors_cfg else None
 
     def track_meta(track_id: str) -> tuple[Track, float, int]:
         """Load a circuit + its pace meta. Raises ``FileNotFoundError`` if not built."""
@@ -252,6 +264,29 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
         session = _Session()
         sim = _SimState()
 
+        def rebuild_field() -> None:
+            """(Re)build the field loop for the current track when ``n_agents > 1``."""
+            if sim.n_agents > 1 and sim.track is not None:
+                cond_factory = (lambda: Conditions.from_config(cfg)) if use_pipeline else None
+                kwargs: dict[str, Any] = {}
+                if field_team_colors:
+                    kwargs["team_colors"] = field_team_colors
+                sim.field_loop = FieldSimLoop(
+                    physics,
+                    sim.track,
+                    sim_cfg,
+                    sim.pole_time_s,
+                    sim.total_laps,
+                    sim.n_agents,
+                    conditions_factory=cond_factory,
+                    reset_mode=field_reset_mode,
+                    grid_spacing_m=field_spacing_m,
+                    grid_lateral_m=field_lateral_m,
+                    **kwargs,
+                )
+            else:
+                sim.field_loop = None
+
         def set_track(track_id: str) -> None:
             tk, pole, laps = track_meta(track_id)
             sim.track = tk
@@ -266,6 +301,7 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
             sim.track_id = track_id
             sim.pole_time_s = pole
             sim.total_laps = laps
+            rebuild_field()
 
         async def apply_policy(msg: PolicyMessage) -> None:
             """Swap the watch-mode driver: a trained checkpoint or the centerline autopilot.
@@ -320,15 +356,23 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                 if not session.running or session.mode not in {"manual", "watch"}:
                     continue
                 frame: dict[str, Any] | None = None
+                # Field (many-cars) mode is watch-only: one shared pilot drives every car.
+                field = session.mode == "watch" and sim.n_agents > 1 and sim.field_loop is not None
                 for _ in range(session.speed):
-                    if session.mode == "manual":
+                    if field:
+                        frame = sim.field_loop.step(sim.autopilot)
+                    elif session.mode == "manual":
                         steer = session.latest_input.steer
                         longitudinal = session.latest_input.longitudinal
+                        frame = sim.loop.step(steer, longitudinal)
                     else:
                         steer, longitudinal = sim.autopilot.control(sim.loop.state)
-                    frame = sim.loop.step(steer, longitudinal)
-                    if session.recorder is not None:
-                        session.recorder.append(frame["t"], frame["car"], frame["telemetry"])
+                        frame = sim.loop.step(steer, longitudinal)
+                    if session.recorder is not None and frame is not None:
+                        if field:
+                            session.recorder.append_cars(frame["t"], frame["cars"])
+                        else:
+                            session.recorder.append(frame["t"], frame["car"], frame["telemetry"])
                 if frame is not None:
                     await ws.send_json(frame)
 
@@ -342,6 +386,8 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                     session.latest_input = msg
                     if msg.reset:
                         sim.loop.reset()
+                        if sim.field_loop is not None:
+                            sim.field_loop.reset()
                 elif isinstance(msg, ModeMessage):
                     session.mode = msg.mode
                 elif isinstance(msg, TrackMessage):
@@ -369,8 +415,21 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                             await apply_policy(PolicyMessage(source="checkpoint", id=prev_policy))
                 elif isinstance(msg, PolicyMessage):
                     await apply_policy(msg)
+                elif isinstance(msg, FieldMessage):
+                    # Phase 5: change the live field size; rebuild the field loop and keep the
+                    # active checkpoint driving every car (watch-only; the obs is track-agnostic).
+                    prev_policy = sim.policy_id
+                    sim.n_agents = int(msg.n_agents)
+                    rebuild_field()
+                    await ws.send_json(
+                        {"type": "event", "event": "field_changed", "n_agents": sim.n_agents}
+                    )
+                    if prev_policy is not None:
+                        await apply_policy(PolicyMessage(source="checkpoint", id=prev_policy))
                 elif isinstance(msg, WeatherMessage):
                     sim.loop.set_weather(msg.condition)
+                    if sim.field_loop is not None:
+                        sim.field_loop.set_weather(msg.condition)
                     await ws.send_json(
                         {"type": "event", "event": "weather_changed", "condition": msg.condition}
                     )
@@ -381,12 +440,19 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                         session.running = False
                     elif msg.action == "restart":
                         sim.loop.reset()
+                        if sim.field_loop is not None:
+                            sim.field_loop.reset()
                     if msg.speed is not None:
                         session.speed = msg.speed
                 elif isinstance(msg, RecordMessage):
                     if msg.action == "start":
+                        # Record the field under the multi-car schema when in field watch mode.
+                        field_rec = session.mode == "watch" and sim.n_agents > 1
                         session.recorder = TrajectoryRecorder(
-                            sim.track_id, sim_cfg.dt_control, int(cfg.seed)
+                            sim.track_id,
+                            sim_cfg.dt_control,
+                            int(cfg.seed),
+                            n_agents=sim.n_agents if field_rec else None,
                         )
                     elif msg.action == "stop" and session.recorder is not None:
                         if len(session.recorder) > 0:
@@ -437,6 +503,9 @@ class _SimState:
         self.policy_id: str | None = None
         self.pole_time_s: float = 0.0
         self.total_laps: int = 1
+        # Phase 5: live field. n_agents == 1 => single SimLoop; > 1 => FieldSimLoop (watch only).
+        self.n_agents: int = 1
+        self.field_loop: FieldSimLoop | None = None
 
 
 app = create_app()

@@ -1,4 +1,4 @@
-"""Single-agent racing environment (TECHNICAL_DESIGN.md §10, plan §A).
+"""Single-agent racing environment + the reusable per-car step (TECHNICAL_DESIGN.md §10).
 
 ``RacingEnv`` owns the car state, the physics stepper (built through
 :func:`f1rl.physics.make_physics`, never a concrete model), the track, the conditions,
@@ -6,6 +6,16 @@ the reward, the termination logic, the lap tracker, and an optional trajectory r
 It runs its own fixed-step loop (``substeps`` physics substeps per control step) — it does
 **not** import :class:`~f1rl.sim.loop.SimLoop`, so it stays rendering-free and
 recorder-optional. It passes ``gymnasium.utils.env_checker.check_env``.
+
+**Phase 5 factoring.** The per-car update is extracted into :func:`step_one_car` (and the
+per-car placement into :func:`reset_car`), keyed by a :class:`CarRuntime` (the *car* state —
+``CarState``, its **own** ``LapTimer``, and the per-step projection ``prev_s``/``grip_idx``/
+``grip_lat``/``wrong_way_count``) and a read-only :class:`CarStepConfig` (the shared physics /
+sim / limits / obs / reward / conditions). ``RacingEnv`` is now a thin one-car wrapper over
+that unit, and :class:`~f1rl.env.multi_agent.RacingParallelEnv` reuses the exact same unit per
+car — so the math is written once. The read-only circuit comes from a pool
+:class:`~f1rl.env.pool.CircuitEntry` (its ``track``/``edge_cache``/``track_id``/``pole_time_s``
+only — never its ``lap_timer``, which is per car).
 
 Config-driven throughout: every tunable (sim timing, physics, obs params, reward weights,
 target laps, step limit, start randomization, termination thresholds) comes from config.
@@ -29,10 +39,11 @@ from f1rl.env.observations import (
     observation_space,
     track_query,
 )
-from f1rl.env.pool import CircuitPool, pool_ids_from_config
+from f1rl.env.pool import CircuitEntry, CircuitPool, pool_ids_from_config
 from f1rl.env.rewards import RewardWeights, reward_v1, reward_v2
 from f1rl.physics import make_physics
-from f1rl.physics.base import CarState
+from f1rl.physics.base import CarState, PhysicsModel
+from f1rl.sim.timing import LapTimer, Timing
 from f1rl.track.schema import Track
 
 # Default env limits / termination thresholds (overridable from the ``env:`` config block).
@@ -106,6 +117,242 @@ class EnvLimits:
         )
 
 
+# ===== The reusable per-car unit (shared by RacingEnv and RacingParallelEnv) =============
+
+
+@dataclass
+class CarRuntime:
+    """All mutable state of ONE car — never pooled, never read off the env.
+
+    The Phase 5 trap is treating any of this as circuit/env state: the ``LapTimer`` is the
+    car's own instance (``LapTimer(track, pole)``, *not* the pool entry's), and the
+    projection fields (``prev_s``/``grip_idx``/``grip_lat``/``wrong_way_count``) are carried
+    per car so N cars on one circuit never stomp each other's lap or grip state.
+    """
+
+    state: CarState
+    lap_timer: LapTimer  # this car's OWN timer (never the pooled CircuitEntry.lap_timer)
+    prev_s: float = 0.0
+    grip_idx: int = 0
+    grip_lat: float = 0.0
+    wrong_way_count: int = 0
+    t: float = 0.0
+    step_count: int = 0
+    done: bool = False  # frozen after termination/truncation (black_death pads it in the field)
+
+
+@dataclass(frozen=True)
+class CarStepConfig:
+    """Read-only, shared-by-the-field step configuration (built once per env/worker).
+
+    Holds the references the per-car step reads but never mutates per car: the physics
+    stepper (a pure function behind :class:`PhysicsModel`), loop timing, limits, obs params,
+    reward weights, and the grip-pipeline :class:`Conditions`. ``conditions``/``physics`` are
+    *shared* live objects — the curriculum mutates them in place (``apply_conditions``), which
+    is intended and safe (no per-step write).
+    """
+
+    physics: PhysicsModel
+    sim: SimParams
+    limits: EnvLimits
+    obs_params: ObsParams
+    reward_weights: RewardWeights
+    conditions: Conditions
+    use_pipeline: bool
+    start_compound: int
+
+    @classmethod
+    def from_config(cls, cfg: Any) -> CarStepConfig:
+        physics = make_physics(cfg)
+        conditions = Conditions.from_config(cfg)
+        model = str(_cfg_get(getattr(cfg, "physics", None) or cfg, "model", ""))
+        return cls(
+            physics=physics,
+            sim=SimParams.from_config(cfg),
+            limits=EnvLimits.from_config(cfg),
+            obs_params=ObsParams.from_config(cfg),
+            reward_weights=RewardWeights.from_config(cfg),
+            conditions=conditions,
+            use_pipeline=(model == "dynamic"),
+            start_compound=int(conditions.tires.start_compound),
+        )
+
+
+def reset_car(
+    entry: CircuitEntry,
+    cfg: CarStepConfig,
+    idx: int,
+    lap_timer: LapTimer,
+    *,
+    lateral_m: float = 0.0,
+) -> tuple[CarRuntime, np.ndarray, Timing]:
+    """Place one car at centerline sample ``idx`` (optionally offset ``lateral_m`` sideways).
+
+    Builds the ``CarState`` (heading = the centerline tangent), resets ``lap_timer`` and seeds
+    its previous-s so it does not spuriously detect a lap, seeds the projection state, and
+    returns ``(car, obs, timing)``. ``lateral_m`` shifts the start along the left normal (used
+    by the field's ``grid`` reset to stagger columns); ``0`` reproduces the single-agent
+    centerline start exactly.
+    """
+    track = entry.track
+    c = track.centerline[idx]
+    tan = track.tangent[idx]
+    yaw = math.atan2(float(tan[1]), float(tan[0]))
+    x = float(c[0])
+    y = float(c[1])
+    if lateral_m != 0.0:
+        nrm = track.normal[idx]
+        x += float(nrm[0]) * lateral_m
+        y += float(nrm[1]) * lateral_m
+    state = CarState(
+        x=x,
+        y=y,
+        yaw=yaw,
+        vx=float(cfg.limits.start_speed),
+        compound=cfg.start_compound,
+    )
+    lap_timer.reset()
+    car = CarRuntime(
+        state=state,
+        lap_timer=lap_timer,
+        prev_s=float(track.s[idx]),
+        grip_idx=int(idx),
+        grip_lat=float(lateral_m),
+    )
+    # Seed the lap timer's internal previous-s so it does not spuriously detect a lap.
+    timing = lap_timer.update(state.x, state.y, 0.0)
+    obs = _build_obs(entry, cfg, car)
+    return car, obs, timing
+
+
+def step_one_car(
+    entry: CircuitEntry,
+    cfg: CarStepConfig,
+    car: CarRuntime,
+    action: np.ndarray,
+) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    """Advance ONE car one control step — the identical math to the legacy ``RacingEnv.step``.
+
+    Reads ``car.*`` (mutated in place) and the read-only circuit (``entry.track`` /
+    ``entry.edge_cache`` / ``entry.track_id`` / ``entry.pole_time_s`` — never
+    ``entry.lap_timer``). Returns the Gymnasium 5-tuple; ``info`` carries the per-car lap /
+    off-track / reward terms plus the shared ``circuit_id`` and ``pole_time_s``.
+    """
+    steer, longitudinal = _map_action(action)
+
+    # Grip for this control step from the pre-step surface/wear/weather. Reuses the projection
+    # stored from the previous step / reset — no extra track_query.
+    grip = _step_grip(entry, cfg, car)
+    for _ in range(cfg.sim.substeps):
+        car.state = cfg.physics.step(car.state, steer, longitudinal, grip, cfg.sim.dt_physics)
+    car.t += cfg.sim.dt_control
+    car.step_count += 1
+
+    track = entry.track
+    # Recompute the projection once, shared by reward + off-track + obs build + next grip.
+    idx, s_along, signed_lateral, half_width, _heading = track_query(
+        track, car.state.x, car.state.y, car.state.yaw
+    )
+    off_track_m = max(0.0, abs(signed_lateral) - half_width)
+    car.grip_idx = int(idx)
+    car.grip_lat = float(signed_lateral)
+
+    timing = car.lap_timer.update(car.state.x, car.state.y, car.t)
+
+    if cfg.reward_weights.version >= 2:
+        slip = abs(car.state.vy) / max(abs(car.state.vx), 1.0)
+        reward, terms = reward_v2(
+            car.prev_s, s_along, off_track_m, track.length, cfg.reward_weights, slip
+        )
+    else:
+        reward, terms = reward_v1(
+            car.prev_s, s_along, off_track_m, track.length, cfg.reward_weights
+        )
+    car.prev_s = s_along
+
+    # Wrong-way tracking: sustained backward progress.
+    if terms["ds"] < cfg.limits.wrong_way_ds_m:
+        car.wrong_way_count += 1
+    else:
+        car.wrong_way_count = 0
+
+    terminated, truncated, term_reason = _check_termination(cfg.limits, car, timing, off_track_m)
+    if terminated and term_reason in ("offtrack", "wrong_way"):
+        reward += cfg.limits.failure_reward
+        terms["failure"] = cfg.limits.failure_reward
+        terms["total"] = reward
+
+    obs = _build_obs(entry, cfg, car)
+    info = {
+        "lap_time": timing.lap_time,
+        "off_track": off_track_m,
+        "progress": timing.progress,
+        "completed_laps": timing.completed_laps,
+        "last_lap": timing.last_lap,
+        "best_lap": timing.best_lap,
+        "delta_to_pole": timing.delta_to_pole,
+        "reward_terms": terms,
+        "termination": term_reason,
+        "steps": car.step_count,
+        "grip": grip,
+        "tire_wear": car.state.tire_wear,
+        "compound": car.state.compound,
+        "weather": cfg.conditions.weather,
+        "circuit_id": entry.track_id,
+        "pole_time_s": entry.pole_time_s,
+    }
+    return obs, float(reward), bool(terminated), bool(truncated), info
+
+
+def _map_action(action: np.ndarray) -> tuple[float, float]:
+    """Map the policy action to physics controls (clip to the action box).
+
+    The physics step maps ``steer in [-1,1]`` to ``[-max_steer, +max_steer]`` and
+    ``longitudinal>=0`` to throttle / ``<0`` to brake, so we just clip here.
+    """
+    a = np.asarray(action, dtype=np.float64).reshape(-1)
+    steer = float(np.clip(a[0], -1.0, 1.0))
+    longitudinal = float(np.clip(a[1], -1.0, 1.0))
+    return steer, longitudinal
+
+
+def _step_grip(entry: CircuitEntry, cfg: CarStepConfig, car: CarRuntime) -> float:
+    """Grip scalar for the next physics step (pipeline when dynamic, else constant)."""
+    if not cfg.use_pipeline:
+        return cfg.conditions.grip
+    return cfg.conditions.grip_at(
+        entry.track, car.grip_idx, car.grip_lat, car.state.tire_wear, car.state.compound
+    )
+
+
+def _build_obs(entry: CircuitEntry, cfg: CarStepConfig, car: CarRuntime) -> np.ndarray:
+    """ObservationV2 at the car state, with the grip indicator from the last projection."""
+    grip_ind = cfg.conditions.grip_indicator(
+        entry.track, car.grip_idx, car.grip_lat, car.state.tire_wear, car.state.compound
+    )
+    return build_observation(
+        entry.track, car.state, cfg.obs_params, entry.edge_cache, grip_indicator=grip_ind
+    )
+
+
+def _check_termination(
+    limits: EnvLimits, car: CarRuntime, timing: Any, off_track_m: float
+) -> tuple[bool, bool, str | None]:
+    """Success on target laps; failure on large off-track / wrong-way; truncate on steps."""
+    if timing.completed_laps >= limits.target_laps:
+        return True, False, "success"
+    if off_track_m >= limits.offtrack_limit_m:
+        return True, False, "offtrack"
+    if car.wrong_way_count >= limits.wrong_way_steps:
+        return True, False, "wrong_way"
+    if car.step_count >= limits.max_steps:
+        return False, True, "truncated"
+    return False, False, None
+
+
+# ===== RacingEnv — a thin one-car wrapper over the unit above ============================
+
+
 class RacingEnv(gym.Env):
     """One car learning one circuit on the configured physics. Passes the env checker."""
 
@@ -147,24 +394,25 @@ class RacingEnv(gym.Env):
         self._pinned_id: str | None = (
             self.pool.sample(self.np_random) if self.pool.pin_per_worker else None
         )
+
+        # The shared, read-only per-car step config (physics/sim/limits/obs/reward/conditions).
+        self._car_cfg = CarStepConfig.from_config(cfg)
+        # Expose the shared components as attributes for callers/tests (the curriculum mutates
+        # `conditions`/`physics` in place through these same references).
+        self.physics = self._car_cfg.physics
+        self.conditions = self._car_cfg.conditions
+        self.obs_params = self._car_cfg.obs_params
+        self.sim = self._car_cfg.sim
+        self.limits = self._car_cfg.limits
+        self.reward_weights = self._car_cfg.reward_weights
+        self.use_pipeline = self._car_cfg.use_pipeline
+        self.start_compound = self._car_cfg.start_compound
+
         # Bind an initial active circuit (the configured track_id when in the pool, else the
         # first pool id) so attributes exist before the first reset.
         initial = track_id if track_id in self.pool else self.pool.ids[0]
         self._bind_circuit(initial)
 
-        self.physics = make_physics(cfg)
-        self.sim = SimParams.from_config(cfg)
-        self.limits = EnvLimits.from_config(cfg)
-        self.obs_params = ObsParams.from_config(cfg)
-        self.reward_weights = RewardWeights.from_config(cfg)
-        self.conditions = Conditions.from_config(cfg)
-
-        # The grip pipeline gates the dynamic model; the kinematic model ignores grip, so the
-        # constant fallback is fine there (no surface lookup overhead).
-        self.use_pipeline = str(_cfg_get(getattr(cfg, "physics", None) or cfg, "model", "")) == (
-            "dynamic"
-        )
-        self.start_compound = int(self.conditions.tires.start_compound)
         # Weather mode: a concrete condition ("dry"/"damp"/"wet") or "sampled" (the curriculum
         # sets this; reset() then draws wet with probability weather.p_wet).
         self._weather_mode = str(self.conditions.weather)
@@ -174,16 +422,13 @@ class RacingEnv(gym.Env):
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         self.observation_space = observation_space()
 
-        # Episode state, set in reset().
-        self.state: CarState = CarState()
-        self._t = 0.0
-        self._step_count = 0
-        self._prev_s = 0.0
-        self._wrong_way_count = 0
-        # Last centerline projection (idx, signed_lateral) — reused next step for the grip
-        # pipeline (pre-step surface/wear), so each track_query is used once (no re-projection).
-        self._grip_idx = 0
-        self._grip_lat = 0.0
+        # Build an initial car so `self.state` exists before the first reset.
+        self._car, _obs, _timing = reset_car(self._entry, self._car_cfg, 0, self.lap_timer)
+
+    @property
+    def state(self) -> CarState:
+        """The car's current :class:`CarState` (the single car this env owns)."""
+        return self._car.state
 
     # ----- gymnasium API ----------------------------------------------------------------
 
@@ -200,28 +445,8 @@ class RacingEnv(gym.Env):
 
         self._resolve_weather()
         idx = self._sample_start_index(options)
-        c = self.track.centerline[idx]
-        tan = self.track.tangent[idx]
-        yaw = math.atan2(float(tan[1]), float(tan[0]))
-        self.state = CarState(
-            x=float(c[0]),
-            y=float(c[1]),
-            yaw=yaw,
-            vx=float(self.limits.start_speed),
-            compound=self.start_compound,
-        )
+        self._car, obs, timing = reset_car(self._entry, self._car_cfg, idx, self.lap_timer)
 
-        self._t = 0.0
-        self._step_count = 0
-        self._wrong_way_count = 0
-        self.lap_timer.reset()
-        # Seed the lap timer's internal previous-s so it does not spuriously detect a lap.
-        timing = self.lap_timer.update(self.state.x, self.state.y, self._t)
-        self._prev_s = float(self.track.s[idx])
-        self._grip_idx = int(idx)
-        self._grip_lat = 0.0  # starts on the centerline
-
-        obs = self._build_obs()
         info = {
             "lap_time": timing.lap_time,
             "off_track": 0.0,
@@ -232,89 +457,30 @@ class RacingEnv(gym.Env):
             "pole_time_s": self._pole,
         }
         if self.recorder is not None:
-            self._record(timing)
+            self._record(timing.lap_time, timing.progress)
         return obs, info
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        steer, longitudinal = self._map_action(action)
-
-        # Grip for this control step from the pre-step surface/wear/weather (plan §6). Reuses
-        # the projection stored from the previous step / reset — no extra track_query.
-        grip = self._step_grip()
-        for _ in range(self.sim.substeps):
-            self.state = self.physics.step(
-                self.state, steer, longitudinal, grip, self.sim.dt_physics
-            )
-        self._t += self.sim.dt_control
-        self._step_count += 1
-
-        # Recompute the projection once, shared by reward + off-track + obs build + next grip.
-        idx, s_along, signed_lateral, half_width, _heading = track_query(
-            self.track, self.state.x, self.state.y, self.state.yaw
+        obs, reward, terminated, truncated, info = step_one_car(
+            self._entry, self._car_cfg, self._car, action
         )
-        off_track_m = max(0.0, abs(signed_lateral) - half_width)
-        self._grip_idx = int(idx)
-        self._grip_lat = float(signed_lateral)
-
-        timing = self.lap_timer.update(self.state.x, self.state.y, self._t)
-
-        if self.reward_weights.version >= 2:
-            slip = abs(self.state.vy) / max(abs(self.state.vx), 1.0)
-            reward, terms = reward_v2(
-                self._prev_s, s_along, off_track_m, self.track.length, self.reward_weights, slip
-            )
-        else:
-            reward, terms = reward_v1(
-                self._prev_s, s_along, off_track_m, self.track.length, self.reward_weights
-            )
-        self._prev_s = s_along
-
-        # Wrong-way tracking: sustained backward progress.
-        if terms["ds"] < self.limits.wrong_way_ds_m:
-            self._wrong_way_count += 1
-        else:
-            self._wrong_way_count = 0
-
-        terminated, truncated, term_reason = self._check_termination(timing, off_track_m)
-        if terminated and term_reason in ("offtrack", "wrong_way"):
-            reward += self.limits.failure_reward
-            terms["failure"] = self.limits.failure_reward
-            terms["total"] = reward
-
-        obs = self._build_obs()
-        info = {
-            "lap_time": timing.lap_time,
-            "off_track": off_track_m,
-            "progress": timing.progress,
-            "completed_laps": timing.completed_laps,
-            "last_lap": timing.last_lap,
-            "best_lap": timing.best_lap,
-            "reward_terms": terms,
-            "termination": term_reason,
-            "steps": self._step_count,
-            "grip": grip,
-            "tire_wear": self.state.tire_wear,
-            "compound": self.state.compound,
-            "weather": self.conditions.weather,
-            "circuit_id": self.track_id,
-            "pole_time_s": self._pole,
-        }
         if self.recorder is not None:
-            self._record(timing)
-        return obs, float(reward), bool(terminated), bool(truncated), info
+            self._record(info["lap_time"], info["progress"])
+        return obs, reward, terminated, truncated, info
 
     # ----- circuit pool (Phase 4) -------------------------------------------------------
 
     def _bind_circuit(self, cid: str) -> None:
         """Rebind every per-circuit binding to pool entry ``cid`` (the swap point).
 
-        These four bindings (plus the active pole) are the *entire* per-circuit state ``step``
-        reads through ``self.*``; the per-step projection state (``_grip_idx``/``_grip_lat``/
-        ``_prev_s``) is re-seeded for the drawn circuit later in ``reset`` before the first
-        ``step``, so no stale per-track state carries across a swap. The lap timer is per
-        circuit and is ``reset()`` each episode, so it never fires spuriously across a swap.
+        Stores the read-only entry (``track``/``edge_cache``/``track_id``/``pole`` used by the
+        per-car step) and the active ``lap_timer`` (this single env reuses the entry's timer —
+        a field env instead builds one timer *per car*). The per-step projection state lives on
+        the ``CarRuntime`` and is re-seeded by ``reset`` before the first ``step``, so no stale
+        per-track state carries across a swap.
         """
         entry = self.pool.entries[cid]
+        self._entry = entry
         self.track = entry.track
         self.track_id = cid
         self.edge_cache = entry.edge_cache
@@ -345,67 +511,15 @@ class RacingEnv(gym.Env):
         to the dynamic physics. Takes effect from the next ``reset``/``step``; never touches
         the observation layout, so it is safe mid-run (no retrain).
         """
-        if mu_base is not None:
-            self.conditions.set_mu_base(float(mu_base))
+        apply_conditions(self._car_cfg, mu_base=mu_base, wear_rate=wear_rate, weather=weather)
         if weather is not None:
             self._weather_mode = str(weather)
-        if wear_rate is not None and hasattr(self.physics, "params"):
-            params = self.physics.params
-            if hasattr(params, "wear_rate"):
-                import dataclasses
-
-                self.physics.params = dataclasses.replace(params, wear_rate=float(wear_rate))
 
     def _resolve_weather(self) -> None:
         """Set the episode weather: a fixed condition, or sample wet with ``p_wet`` if sampled."""
-        if self._weather_mode == "sampled":
-            p_wet = float(self.conditions.weather_params.p_wet)
-            weather = "wet" if float(self.np_random.random()) < p_wet else "dry"
-        else:
-            weather = self._weather_mode
-        self.conditions.set_weather(weather)
+        resolve_weather(self._car_cfg, self._weather_mode, self.np_random)
 
     # ----- helpers ----------------------------------------------------------------------
-
-    def _step_grip(self) -> float:
-        """Grip scalar for the next physics step (pipeline when dynamic, else constant)."""
-        if not self.use_pipeline:
-            return self.conditions.grip
-        return self.conditions.grip_at(
-            self.track, self._grip_idx, self._grip_lat, self.state.tire_wear, self.state.compound
-        )
-
-    def _build_obs(self) -> np.ndarray:
-        """ObservationV2 at the current state, with the grip indicator from the last projection."""
-        grip_ind = self.conditions.grip_indicator(
-            self.track, self._grip_idx, self._grip_lat, self.state.tire_wear, self.state.compound
-        )
-        return build_observation(
-            self.track, self.state, self.obs_params, self.edge_cache, grip_indicator=grip_ind
-        )
-
-    def _check_termination(self, timing: Any, off_track_m: float) -> tuple[bool, bool, str | None]:
-        """Success on target laps; failure on large off-track / wrong-way; truncate on steps."""
-        if timing.completed_laps >= self.limits.target_laps:
-            return True, False, "success"
-        if off_track_m >= self.limits.offtrack_limit_m:
-            return True, False, "offtrack"
-        if self._wrong_way_count >= self.limits.wrong_way_steps:
-            return True, False, "wrong_way"
-        if self._step_count >= self.limits.max_steps:
-            return False, True, "truncated"
-        return False, False, None
-
-    def _map_action(self, action: np.ndarray) -> tuple[float, float]:
-        """Map the policy action to physics controls.
-
-        The physics step itself maps ``steer in [-1,1]`` to ``[-max_steer, +max_steer]`` and
-        ``longitudinal>=0`` to throttle / ``<0`` to brake, so we just clip to the box here.
-        """
-        a = np.asarray(action, dtype=np.float64).reshape(-1)
-        steer = float(np.clip(a[0], -1.0, 1.0))
-        longitudinal = float(np.clip(a[1], -1.0, 1.0))
-        return steer, longitudinal
 
     def _sample_start_index(self, options: dict[str, Any] | None) -> int:
         n = len(self.track.centerline)
@@ -415,10 +529,10 @@ class RacingEnv(gym.Env):
             return int(self.np_random.integers(0, n))
         return 0
 
-    def _record(self, timing: Any) -> None:
-        s = self.state
+    def _record(self, lap_time: float, progress: float) -> None:
+        s = self._car.state
         self.recorder.append(
-            self._t,
+            self._car.t,
             {
                 "x": round(s.x, 3),
                 "y": round(s.y, 3),
@@ -427,10 +541,43 @@ class RacingEnv(gym.Env):
             },
             {
                 "speed_kmh": round(s.speed * 3.6),
-                "lap_time": round(timing.lap_time, 3),
-                "progress": round(timing.progress, 4),
+                "lap_time": round(lap_time, 3),
+                "progress": round(progress, 4),
             },
         )
+
+
+# ===== shared curriculum / weather helpers (used by both envs) ==========================
+
+
+def apply_conditions(
+    cfg: CarStepConfig,
+    *,
+    mu_base: float | None = None,
+    wear_rate: float | None = None,
+    weather: str | None = None,
+) -> None:
+    """Apply curriculum condition overrides to the shared :class:`CarStepConfig` in place."""
+    if mu_base is not None:
+        cfg.conditions.set_mu_base(float(mu_base))
+    if weather is not None:
+        cfg.conditions.set_weather(str(weather))
+    if wear_rate is not None and hasattr(cfg.physics, "params"):
+        params = cfg.physics.params
+        if hasattr(params, "wear_rate"):
+            import dataclasses
+
+            cfg.physics.params = dataclasses.replace(params, wear_rate=float(wear_rate))
+
+
+def resolve_weather(cfg: CarStepConfig, weather_mode: str, rng: np.random.Generator) -> None:
+    """Set the episode weather on the shared conditions (fixed, or sampled wet with ``p_wet``)."""
+    if weather_mode == "sampled":
+        p_wet = float(cfg.conditions.weather_params.p_wet)
+        weather = "wet" if float(rng.random()) < p_wet else "dry"
+    else:
+        weather = weather_mode
+    cfg.conditions.set_weather(weather)
 
 
 def _cfg_get(cfg: Any, key: str, default: Any) -> Any:

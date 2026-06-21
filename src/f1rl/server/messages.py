@@ -106,6 +106,26 @@ class WeatherMessage(BaseModel):
     condition: Literal["dry", "damp", "wet"]
 
 
+class FieldMessage(BaseModel):
+    """Set the live field size (Phase 5 many-cars view).
+
+    ``n_agents == 1`` is the single-car path (a :class:`~f1rl.sim.loop.SimLoop`); ``> 1``
+    switches the watch session to a :class:`~f1rl.sim.loop.FieldSimLoop` that drives N cars
+    with one shared pilot on a starting grid. Field mode is watch-only (one policy drives the
+    whole grid); the active checkpoint/autopilot is re-applied across the switch.
+    """
+
+    type: Literal["field"] = "field"
+    n_agents: int = 1
+
+    @field_validator("n_agents")
+    @classmethod
+    def _check_n(cls, v: int) -> int:
+        if not (1 <= v <= 22):
+            raise ValueError("n_agents must be in [1, 22]")
+        return v
+
+
 class SurfaceEdit(BaseModel):
     """Edited surface band widths for ``POST /track/{id}/surfaces`` (uniform, meters).
 
@@ -145,6 +165,7 @@ ClientMessage = (
     | TrackMessage
     | PolicyMessage
     | WeatherMessage
+    | FieldMessage
 )
 
 _PARSERS: dict[str, type[BaseModel]] = {
@@ -155,6 +176,7 @@ _PARSERS: dict[str, type[BaseModel]] = {
     "track": TrackMessage,
     "policy": PolicyMessage,
     "weather": WeatherMessage,
+    "field": FieldMessage,
 }
 
 

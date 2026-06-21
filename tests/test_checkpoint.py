@@ -117,6 +117,7 @@ def test_meta_sidecar_holds_required_fields(cfg, tmp_path):
         "total_timesteps",
         "circuit_id",
         "obs_version",
+        "n_agents",  # Phase 5: the constant field size the run trained on
         "seed",
         "config_snapshot",
         "sb3_version",
@@ -124,6 +125,39 @@ def test_meta_sidecar_holds_required_fields(cfg, tmp_path):
     }
     assert required <= set(meta), f"missing meta keys: {required - set(meta)}"
     assert meta["obs_version"] == OBS_VERSION
+    # The single-agent path records a one-car field.
+    assert int(meta["n_agents"]) == 1
+
+
+class _FakeModel:
+    """Minimal stand-in for build_meta (it only reads num_timesteps + action_space.shape)."""
+
+    num_timesteps = 100
+    action_space = type("S", (), {"shape": (2,)})()
+
+
+def test_build_meta_records_field_size():
+    from f1rl.train.checkpointing import build_meta
+
+    meta = build_meta(_FakeModel(), {"grid": {"n_agents": 4}, "track_id": "monza", "seed": 2})
+    assert meta["n_agents"] == 4
+    assert meta["obs_version"] == OBS_VERSION
+
+
+def test_build_meta_defaults_field_size_to_one():
+    from f1rl.train.checkpointing import build_meta
+
+    meta = build_meta(_FakeModel(), {"track_id": "oval"})
+    assert meta["n_agents"] == 1
+
+
+def test_warm_start_across_field_widths_validates():
+    # A smaller-field checkpoint must load into a larger-field run: the obs/action spaces match
+    # across widths and n_agents is NOT validated, so a 2-car checkpoint warm-starts a 4-car run.
+    from f1rl.train.checkpointing import validate_checkpoint
+
+    meta = {"obs_version": OBS_VERSION, "action_shape": [2], "n_agents": 2}
+    assert validate_checkpoint(meta) in (True, None)
 
 
 def test_validate_checkpoint_accepts_matching_meta(cfg):

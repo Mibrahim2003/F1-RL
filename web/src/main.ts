@@ -107,7 +107,7 @@ function onStateFrame(frame: StateFrame): void {
   // live frames only matter in manual/watch (not replay/configure)
   const mode = store.get().mode;
   if (mode === "replay" || mode === "configure") return;
-  renderer.pushPose(frame.t, frame.car);
+  renderer.pushFrame(frame); // handles single car or a field (cars[])
   hud.update(frame);
 }
 
@@ -448,6 +448,11 @@ window.addEventListener("keydown", (e) => {
   } else if (e.code === "KeyT") {
     // Phase 4 result view: the calendar lap-time-vs-pole table.
     calendar.toggle();
+  } else if (/^Digit[1-9]$/.test(e.code) && store.get().mode === "watch") {
+    // Phase 5: pick the live field size (1 = single car, 2..9 = a grid of N cars).
+    const n = Number(e.code.slice(5));
+    socket.sendField(n);
+    renderer.clearPoses();
   }
 });
 

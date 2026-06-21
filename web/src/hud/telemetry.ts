@@ -18,7 +18,22 @@ import {
   formatSpeed,
   formatWear,
 } from "../format.ts";
-import type { Meta, StateFrame } from "../types.ts";
+import type { CarEntry, Meta, StateFrame } from "../types.ts";
+
+// Team color palette for the field tower (mirrors configs/default.yaml grid.team_colors).
+const TEAM_COLORS = [
+  "#e10600",
+  "#00d2be",
+  "#0600ef",
+  "#ff8700",
+  "#006f62",
+  "#2b4562",
+  "#900000",
+  "#005aff",
+  "#ffffff",
+  "#358c75",
+  "#c92d4b",
+];
 
 interface TowerRowData {
   pos: number;
@@ -50,7 +65,11 @@ export class Hud {
 
   /** Update HUD + tower + clock from a live or replayed state frame. */
   update(frame: StateFrame): void {
-    const tm = frame.telemetry;
+    // The leader's telemetry drives the bottom bar; field frames carry it at the top level.
+    const tm = (frame.telemetry ?? frame.cars?.[0]?.telemetry) as
+      | StateFrame["telemetry"]
+      | undefined;
+    if (!tm) return;
 
     // bottom bar
     $("speed").textContent = formatSpeed(tm.speed_kmh);
@@ -76,13 +95,35 @@ export class Hud {
     // top-bar session clock (use frame time as the running clock)
     $("clock").textContent = formatClock(frame.t);
 
-    // timing tower (single row; tyre dot tracks the live compound)
-    this.renderTower({
-      ...this.defaultRow(),
-      tyreColor: compoundColor(tm.compound),
-      gap: "LEADER",
-      gapColor: "var(--text)",
-    });
+    // timing tower: one row per car for a field (Phase 5), else the single live row.
+    if (frame.cars && frame.cars.length > 1) {
+      this.renderTower(...this.fieldRows(frame.cars));
+    } else {
+      this.renderTower({
+        ...this.defaultRow(),
+        tyreColor: compoundColor(tm.compound),
+        gap: "LEADER",
+        gapColor: "var(--text)",
+      });
+    }
+  }
+
+  /** Build timing-tower rows from a field frame, ordered by track-position gap. */
+  private fieldRows(cars: CarEntry[]): TowerRowData[] {
+    const sorted = [...cars].sort((a, b) => (a.gap_m ?? 0) - (b.gap_m ?? 0));
+    return sorted.map((c, i) => ({
+      pos: i + 1,
+      num: `#${String(i + 1).padStart(2, "0")}`,
+      code: c.id.replace("car_", "C").toUpperCase(),
+      teamColor: TEAM_COLORS[c.team % TEAM_COLORS.length],
+      tyreColor: compoundColor(c.telemetry.compound),
+      gap: i === 0 ? "LEADER" : `+${(c.gap_m ?? 0).toFixed(0)}m`,
+      gapColor: i === 0 ? "var(--text)" : "var(--text-2)",
+      posColor: "var(--text)",
+      codeColor: "var(--text-bright)",
+      isFastest: false,
+      selected: i === 0,
+    }));
   }
 
   /** Reset the readouts to placeholders (e.g. before any frame arrives). */

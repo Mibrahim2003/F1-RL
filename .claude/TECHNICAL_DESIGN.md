@@ -294,16 +294,21 @@ Circuit pool, Phase 4 (one car on many circuits):
 - **Per-circuit pole resolves from `configs/track/<id>.yaml` (`pole_time_s`)**, never from the geometry `.npz`; a missing/non-positive pole is flagged `pole_missing` and its delta is skipped (never divided by zero). The resolver is runtime-safe (YAML only, no FastF1, no network).
 - `set_track_pool(circuits)` — env method mirroring `apply_conditions`: narrows/widens the **active** sampling set from the next `reset` (validates ids are in the built pool), never rebuilds. The curriculum calls it via `VecEnv.env_method` to widen the pool easy → full calendar; sampling-side only, no obs change, no mid-run retrain.
 
-Multi agent, racing phase:
+Multi agent — the field, Phase 5 (many cars, no racing rules yet):
 
-- `RacingParallelEnv(pettingzoo.ParallelEnv)`. All cars step at once. Cars are homogeneous, same observation and action structure.
-- Training uses one shared policy with parameter sharing and self-play. Every car runs the same weights and learns against the current policy. This is the tractable path to many cars and avoids heavy multi-agent machinery.
-- Scale the field gradually: 2 cars, then 4, then the full 22.
+- `RacingParallelEnv(pettingzoo.ParallelEnv)` (`env/multi_agent.py`). N homogeneous cars on **one shared circuit** step at once; `reset(seed)` returns `(obs, info)` **dicts keyed by agent id** (`car_0…car_{N-1}`) and `step(actions)` returns per-agent `(obs, rewards, terminations, truncations, infos)` dicts. `observation_space(agent)`/`action_space(agent)` are the **unchanged** ObservationV2 length-22 Box and 2-D action Box (every agent identical). It passes `pettingzoo.test.parallel_api_test`.
+- **The observation is unchanged (`OBS_VERSION = 2`, no nearby-car block, no collisions, no racing rewards — those are Phase 6).** Each car sees only the track, so the Phase 4 generalist warm-starts directly as the shared brain.
+- **The single-car update is factored once** into `step_one_car`/`reset_car` over a per-car `CarRuntime` (`env/single_agent.py`); `RacingEnv` is a thin one-car wrapper and `RacingParallelEnv` reuses the same unit per car. **What is per-car vs per-circuit is load-bearing:** per car = `CarState`, its **own `LapTimer` instance** (`LapTimer(track, pole)`, *never* the pooled `CircuitEntry.lap_timer`), and the projection state (`prev_s`/`grip_idx`/`grip_lat`/`wrong_way_count`); per circuit (read-only, shared by the field) = the pool entry's `Track`/`EdgeCache`/resolved pole. One car's lap never advances another's.
+- **Constant SuperSuit-visible width via `black_death_v3`.** The raw env follows standard PettingZoo: a terminated/truncated car is removed from `self.agents` on the next step (so it passes `parallel_api_test`). The *constant* agent width the SuperSuit vectorizer requires comes from the `black_death_v3` **wrapper** (it re-pads removed agents to zero), not the raw env. One car finishing or failing never ends the others; the episode ends when `self.agents` is empty or the per-car step limit fires.
+- **`grid:` config block** (field layout): `n_agents` (field size), `reset_mode` (`scattered` train = a distinct seeded centerline index per car; `grid` eval/demo = distinct non-overlapping two-column slots laid out forward from the S/F line), `grid_spacing_m`, `grid_lateral_m`, `team_colors` (render only, never observed). Both reset modes are seeded/reproducible. A non-positive `n_agents` and an unbuilt circuit id are refused.
+- **One shared policy, parameter sharing**, vectorized PettingZoo → SuperSuit (`black_death_v3` → `pettingzoo_env_to_vec_env_v1` → `concat_vec_envs_v1`) → Stable-Baselines3 PPO (`env/factory.py` `make_selfplay_vec_env`, `train/selfplay.py`). Every car's transition trains the same weights; with no mutual observation this equals raising `n_envs` for *learning* (Phase 5 buys infrastructure + the render, not a learning gain).
+- **Field size (`n_agents`) is a per-run constant, grown across warm-started runs (2 → 4 → 22)** — it sets the vector-env width (`n_agents * n_copies`), which the in-place curriculum (`VecEnv.env_method`, sampling-side, no rebuild) cannot change without breaking the PPO rollout buffer. The **circuit-pool widening stays an in-place curriculum knob** (Phase 4, unchanged). `n_agents` is **not** a `CurriculumStage` field. SuperSuit's `ConcatVecEnv` has no `env_method`, so the curriculum reaches the raw field envs via `factory.raw_parallel_envs` (in-process `num_cpus=0` only).
 
 Shared rules:
 
-- Parallel env copies run through Stable-Baselines3 vectorized envs for PPO throughput. The cloud gives few CPU cores, which limits this and motivates the JAX option in section 17.
-- Determinism: one seeding utility seeds Python, NumPy, and PyTorch. Record the seed with every run.
+- Parallel env copies run through Stable-Baselines3 vectorized envs for PPO throughput. The cloud gives few CPU cores, which limits this and motivates the JAX option in section 17. SuperSuit steps all N cars **sequentially inside one process**, so a process's step cost scales ~linearly with N on the dynamic model and is **not** amortized by `SubprocVecEnv` fan-out — measure SPS (field vs equal-width single-agent) before committing field sizes.
+- The checkpoint meta adds `n_agents` (the constant field size the run trained on; 1 = single-agent). It is **not** validated on resume — the per-agent obs/action spaces match across widths, so a smaller-field checkpoint warm-starts a larger-field run.
+- Determinism: one seeding utility seeds Python, NumPy, and PyTorch. Record the seed with every run. The per-episode circuit draw and both reset modes use `self.np_random` (reproducible from the seed).
 
 ---
 
@@ -318,7 +323,7 @@ The interactive application is the primary surface of the project and the first 
 
 The heavy training loop draws nothing, for speed, and the web frontend is never in that hot path. Two paths keep full visibility. The evaluation callback runs offscreen on the cloud, with the SDL video driver set to dummy, renders one episode to an mp4 through Pygame and imageio, and logs the clip — this headless eval-clip path is unchanged by the web pivot. After training, the app loads a checkpoint and runs the agent live. The app stays your view into everything. Only the long training loop runs unseen.
 
-The recorded-trajectory JSON format (section 10's recorder output) is the shared interchange between the live sim, the replay viewer, and the cloud eval-clip renderer: all three consume the same frame stream, so a run recorded in any mode replays identically anywhere.
+The recorded-trajectory JSON format (section 10's recorder output) is the shared interchange between the live sim, the replay viewer, and the cloud eval-clip renderer: all three consume the same frame stream, so a run recorded in any mode replays identically anywhere. Phase 5: the live frame and the recorder carry a `cars: [{id, x, y, yaw, speed, team, telemetry}, …]` array (a single car is a one-element array, so the Phase 1/4 one-car path is unchanged); the field is driven live by `FieldSimLoop` (N cars, one shared pilot) and the frontend draws every car colored by team, follows the leader, and lists the field in the timing tower by track-position gap.
 
 ---
 
@@ -367,9 +372,9 @@ f1-rl/
       net/socket.ts             # WebSocket client to /ws/sim
       input/keyboard.ts         # arrows + WASD -> input messages
       viewport/camera.ts        # meters<->pixels transform, pan/zoom/follow
-      viewport/renderer.ts      # Canvas 2D draw, interpolating 20 Hz states
-      hud/telemetry.ts          # tower + telemetry bar from state frames
-      replay/player.ts          # load + play/pause/scrub a trajectory
+      viewport/renderer.ts      # Canvas 2D draw, 20 Hz interp; field draw per team (Phase 5)
+      hud/telemetry.ts          # tower + telemetry bar; field tower by track-position gap (Phase 5)
+      replay/player.ts          # load + play/pause/scrub a trajectory (single-car or field)
       ui/selector.ts            # track selector
       ui/config_panel.ts        # surface/condition editor (Phase 2)
       ui/policy_picker.ts       # checkpoint picker for watch-live (Phase 3)
@@ -397,13 +402,13 @@ f1-rl/
       app.py                    # FastAPI app: WS /ws/sim, GET /track, GET /recordings, policies
       messages.py               # Pydantic client/server message models
     env/
-      single_agent.py           # RacingEnv (samples a circuit per reset, Phase 4)
+      single_agent.py           # RacingEnv + factored step_one_car/reset_car/CarRuntime (Phase 5)
       observations.py           # ObservationV2 builder (length 22)
       rewards.py                # reward_v1 / reward_v2 (progress core)
       conditions.py             # weather/surface state + grip provider
       pool.py                   # CircuitPool: per-id Track/EdgeCache/LapTimer/pole (Phase 4)
-      factory.py                # make_vec_env (SB3 VecNormalize stack)
-      multi_agent.py            # RacingParallelEnv  (planned, Phase 5)
+      factory.py                # make_vec_env + make_selfplay_vec_env (SuperSuit→SB3, Phase 5)
+      multi_agent.py            # RacingParallelEnv: N-car field, per-car LapTimer (Phase 5)
     render/
       renderer.py               # offscreen frames to mp4 for eval clips (training only)
     train/
@@ -416,7 +421,8 @@ f1-rl/
       benchmark.py              # steps-per-second sweep
       calibrate.py              # tune grip/engine/brake so optimal lap ~ pole
       wandb_logger.py           # W&B with local-CSV fallback
-      selfplay.py               # shared-policy self-play  (planned, Phase 5)
+      selfplay.py               # shared-policy self-play PPO + throughput check (Phase 5)
+      selfplay_eval.py          # multi-car field eval driver (cars[] trajectory + metrics, Phase 5)
     utils/
       seeding.py
       config.py                 # OmegaConf load
@@ -427,16 +433,19 @@ f1-rl/
                                 # obs, rewards, termination, track build/oval, timing,
                                 # recorder, config, seeding, checkpoint, curriculum, server,
                                 # smoke-train (kinematic+dynamic), lap-benchmark,
-                                # circuit-pool, env-sampling, calendar-benchmark (Phase 4)
+                                # circuit-pool, env-sampling, calendar-benchmark (Phase 4),
+                                # multi-agent-env, selfplay-smoke (Phase 5)
 ```
 
 The interactive app is split across the top-level `web/` frontend and two Python packages: `server/` (the FastAPI app and its message models) and `sim/` (the fixed-step loop, lap timing, the trajectory recorder, and the centerline autopilot for watch-live). The `recorder.py` lives under `sim/` because the recorded-trajectory JSON it produces is the shared interchange across live sim, replay, and eval clips. `render/renderer.py` stays under the package as the offscreen eval-clip renderer used by training only; it is never imported by the app or the training hot path.
 
-The tree reflects the repo **as built through Phase 4**; entries tagged `(planned, Phase 5)`
-(`env/multi_agent.py`, `train/selfplay.py`) do not exist yet. Eval-clip rendering is invoked
-through `train/evaluate.py --video` (there is no separate `scripts/render_episode.py`), and
-there is no `notebooks/` directory yet — the Colab/Kaggle path clones the repo and runs
-`python -m f1rl.train.train` directly.
+The tree reflects the repo **as built through Phase 5** (`env/multi_agent.py`,
+`env/factory.make_selfplay_vec_env`, `train/selfplay.py`, `train/selfplay_eval.py`, and the
+`grid:`/`selfplay:` config blocks are all present). Eval-clip rendering is invoked through
+`train/evaluate.py --video` (there is no separate `scripts/render_episode.py`); the Phase 5
+field produces a multi-car `cars[]` trajectory replayed in the web app rather than a multi-car
+mp4. There is no `notebooks/` directory yet — the Colab/Kaggle path clones the repo and runs
+`python -m f1rl.train.train` (single-agent) or `python -m f1rl.train.selfplay` (field) directly.
 
 ---
 
@@ -467,7 +476,7 @@ Phase 3, one car on one circuit. Drop an AI car on a configured circuit. At firs
 
 Phase 4, one car on many circuits. Confirm the observations are fully track-agnostic, then sample a different circuit each episode so one policy handles every track. Artifact: one policy driving every circuit, with a lap-time table against the pole per circuit. As-built contracts: the `circuits:` pool config block and per-episode sampling (§10 circuit pool); per-circuit pole from `configs/track/<id>.yaml`; the curriculum stage gains an optional `circuits:` list that `set_track_pool` widens to the full calendar; the lap-time table (`train/calendar_benchmark.py`, one row per circuit — achieved / pole / delta / 2×-pole flag) is saved as JSON+CSV under `out/` and served at `GET /api/calendar` for the result view (toggle with T). The checkpoint format is unchanged (`obs_version` stays 2 → the Phase 3b checkpoint warm-starts; `--resume` continues the timestep count); `meta.json` `circuit_id` records the pool descriptor (e.g. `"calendar"`).
 
-Phase 5, many cars on track. Add the multi-agent env on PettingZoo with shared-policy self-play, and put the full field on track with no racing rules yet. Scale from 2 cars to 4 to the full 22. Artifact: a grid lapping a circuit together in the app.
+Phase 5, many cars on track. Add the multi-agent env on PettingZoo with shared-policy self-play, and put the full field on track with no racing rules yet. Scale from 2 cars to 4 to the full 22. Artifact: a grid lapping a circuit together in the app. As-built contracts: `RacingParallelEnv` (`env/multi_agent.py`) holds N homogeneous cars on one shared circuit, reusing the factored `step_one_car`/`reset_car` per car with a **per-car `LapTimer`** (never the pooled entry's), passing `parallel_api_test`; the **observation is unchanged** (`OBS_VERSION = 2`, no nearby-car block); the `grid:` config block sets field size + reset mode (`scattered` train / `grid` eval); SuperSuit (`black_death_v3` for constant width → `pettingzoo_env_to_vec_env_v1` → `concat_vec_envs_v1`) → SB3 PPO trains one shared policy (`make_selfplay_vec_env`, `train/selfplay.py`), warm-starting the Phase 4 generalist; **field size is a per-run constant grown across warm-started runs** (the circuit-pool widening stays an in-place curriculum, broadcast to the raw envs); the checkpoint meta adds `n_agents` (not validated across widths); the live frame carries a `cars: [...]` array (single car = one-element, backward compatible) driven by `FieldSimLoop`, with one multi-car recorder and the timing tower listing every car by track-position gap. **The bar is infrastructure + the render, not a learning gain** (none expected with no mutual observation).
 
 Phase 6, racing for real. Add the nearby-car observations, collision detection, the contact penalty, and rewards for overtaking and defending. The accidents, the blocking, and the wheel-to-wheel racing emerge here. This is the hardest phase. Budget the most time. Artifact: a full grid racing with overtaking and defending.
 

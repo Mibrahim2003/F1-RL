@@ -17,6 +17,35 @@ circuits:
   weights: null            # optional {id: w} for weighted sampling; null => uniform
   pin_per_worker: false    # fallback: pin each worker to one drawn pool circuit for its life
 
+# --- Phase 5: many cars on track (RacingParallelEnv) ----------------------------------
+# The field is N homogeneous cars on ONE shared circuit (read-only Track/EdgeCache/pole),
+# each with its OWN CarState + LapTimer. The observation is UNCHANGED (OBS_VERSION = 2): no
+# car sees another this phase. `n_agents` is a PER-RUN constant (it sets the vec-env width),
+# NOT a curriculum knob — grow the field by warm-starting successive runs (2 -> 4 -> 22).
+# A default of 1 reproduces the single-car path (RacingEnv) exactly.
+grid:
+  n_agents: 1              # field size (per-run constant; >=1)
+  reset_mode: scattered    # scattered (train: random idx per car) | grid (eval/demo: slots @ S/F)
+  grid_spacing_m: 12.0     # arc-length gap between grid rows (grid mode); SI meters
+  grid_lateral_m: 3.0      # lateral stagger of the two grid columns (grid mode); SI meters
+  team_colors:             # render only; never seen by the policy
+    - "#e10600"
+    - "#00d2be"
+    - "#0600ef"
+    - "#ff8700"
+    - "#006f62"
+    - "#2b4562"
+    - "#900000"
+    - "#005aff"
+    - "#ffffff"
+    - "#358c75"
+    - "#c92d4b"
+
+# --- Phase 5: self-play vectorization (SuperSuit -> Stable-Baselines3) -----------------
+selfplay:
+  n_copies: 2              # SuperSuit parallel copies of the N-car field; vec width = n_agents*n_copies
+  num_cpus: 0              # SuperSuit worker processes (0 => in-process, deterministic)
+
 sim:
   control_hz: 20          # control step rate (dt_control = 1/20 = 0.05 s)
   substeps: 5             # physics substeps per control step
