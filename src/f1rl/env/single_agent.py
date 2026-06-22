@@ -25,13 +25,14 @@ target laps, step limit, start randomization, termination thresholds) comes from
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import gymnasium as gym
 import gymnasium.utils.seeding as gym_seeding
 import numpy as np
 
+from f1rl.env.collisions import CollisionParams, ContactRecord
 from f1rl.env.conditions import Conditions
 from f1rl.env.observations import (
     ObsParams,
@@ -40,7 +41,7 @@ from f1rl.env.observations import (
     track_query,
 )
 from f1rl.env.pool import CircuitEntry, CircuitPool, pool_ids_from_config
-from f1rl.env.rewards import RewardWeights, reward_v1, reward_v2
+from f1rl.env.rewards import RewardWeights, reward_v1, reward_v2, reward_v3
 from f1rl.physics import make_physics
 from f1rl.physics.base import CarState, PhysicsModel
 from f1rl.sim.timing import LapTimer, Timing
@@ -138,7 +139,12 @@ class CarRuntime:
     wrong_way_count: int = 0
     t: float = 0.0
     step_count: int = 0
+    last_grip: float = 1.0  # grip used by the last physics advance (carried into the step info)
     done: bool = False  # frozen after termination/truncation (black_death pads it in the field)
+    # Phase 6: the contact summary written by the field collision pass each step (zero = clean,
+    # and always zero for the single-agent path / a one-car field), and the race rank last step.
+    contact: ContactRecord = field(default_factory=ContactRecord)
+    prev_rank: int = 1
 
 
 @dataclass(frozen=True)
@@ -157,6 +163,7 @@ class CarStepConfig:
     limits: EnvLimits
     obs_params: ObsParams
     reward_weights: RewardWeights
+    collision: CollisionParams
     conditions: Conditions
     use_pipeline: bool
     start_compound: int
@@ -172,6 +179,7 @@ class CarStepConfig:
             limits=EnvLimits.from_config(cfg),
             obs_params=ObsParams.from_config(cfg),
             reward_weights=RewardWeights.from_config(cfg),
+            collision=CollisionParams.from_config(cfg),
             conditions=conditions,
             use_pipeline=(model == "dynamic"),
             start_compound=int(conditions.tires.start_compound),
@@ -225,31 +233,49 @@ def reset_car(
     return car, obs, timing
 
 
-def step_one_car(
+def advance_car_physics(
     entry: CircuitEntry,
     cfg: CarStepConfig,
     car: CarRuntime,
     action: np.ndarray,
-) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-    """Advance ONE car one control step — the identical math to the legacy ``RacingEnv.step``.
+) -> None:
+    """Advance ONE car's physics one control step (Phase 6 split, part 1 — independent per car).
 
-    Reads ``car.*`` (mutated in place) and the read-only circuit (``entry.track`` /
-    ``entry.edge_cache`` / ``entry.track_id`` / ``entry.pole_time_s`` — never
-    ``entry.lap_timer``). Returns the Gymnasium 5-tuple; ``info`` carries the per-car lap /
-    off-track / reward terms plus the shared ``circuit_id`` and ``pole_time_s``.
+    Maps the action, takes the grip for this step from the pre-step surface/wear/weather (reusing
+    the projection stored from the previous step / reset — no extra ``track_query``), runs the
+    substep physics, and bumps the car's clock/step count. **No projection, reward, or obs** — the
+    field collision pass runs between this and :func:`finalize_car_step`, so this stays a pure
+    per-car update that never reads another car. ``car.state``/``t``/``step_count`` are mutated.
     """
     steer, longitudinal = _map_action(action)
-
-    # Grip for this control step from the pre-step surface/wear/weather. Reuses the projection
-    # stored from the previous step / reset — no extra track_query.
     grip = _step_grip(entry, cfg, car)
+    car.last_grip = grip
     for _ in range(cfg.sim.substeps):
         car.state = cfg.physics.step(car.state, steer, longitudinal, grip, cfg.sim.dt_physics)
     car.t += cfg.sim.dt_control
     car.step_count += 1
 
+
+def finalize_car_step(
+    entry: CircuitEntry,
+    cfg: CarStepConfig,
+    car: CarRuntime,
+    *,
+    neighbor_block: np.ndarray | None = None,
+    places: int = 0,
+) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    """Finalize ONE car after physics (+ the field collision pass) — the Gymnasium 5-tuple.
+
+    Projects once (shared by reward + off-track + obs build + next grip), updates the lap timer,
+    computes the reward (``reward_v3`` when ``reward.version >= 3`` — adding the graded contact
+    penalty from ``car.contact`` and the zero-sum ``places`` term — else ``reward_v2``/``v1``),
+    tracks wrong-way, terminates (with the optional contact crash-out), builds the observation
+    **with the precomputed neighbor block**, and assembles the per-car info (incl. the racing
+    fields). Reads the read-only circuit (never ``entry.lap_timer``). Identical math to the legacy
+    single-car step when there is no contact (``car.contact`` empty) and a constant rank
+    (``places = 0``) — so ``RacingEnv`` and a one-car field reproduce Phase 5 exactly.
+    """
     track = entry.track
-    # Recompute the projection once, shared by reward + off-track + obs build + next grip.
     idx, s_along, signed_lateral, half_width, _heading = track_query(
         track, car.state.x, car.state.y, car.state.yaw
     )
@@ -259,15 +285,24 @@ def step_one_car(
 
     timing = car.lap_timer.update(car.state.x, car.state.y, car.t)
 
-    if cfg.reward_weights.version >= 2:
+    weights = cfg.reward_weights
+    if weights.version >= 3:
         slip = abs(car.state.vy) / max(abs(car.state.vx), 1.0)
-        reward, terms = reward_v2(
-            car.prev_s, s_along, off_track_m, track.length, cfg.reward_weights, slip
+        reward, terms = reward_v3(
+            car.prev_s,
+            s_along,
+            off_track_m,
+            track.length,
+            weights,
+            slip=slip,
+            contact=car.contact,
+            places=int(places),
         )
+    elif weights.version >= 2:
+        slip = abs(car.state.vy) / max(abs(car.state.vx), 1.0)
+        reward, terms = reward_v2(car.prev_s, s_along, off_track_m, track.length, weights, slip)
     else:
-        reward, terms = reward_v1(
-            car.prev_s, s_along, off_track_m, track.length, cfg.reward_weights
-        )
+        reward, terms = reward_v1(car.prev_s, s_along, off_track_m, track.length, weights)
     car.prev_s = s_along
 
     # Wrong-way tracking: sustained backward progress.
@@ -277,12 +312,19 @@ def step_one_car(
         car.wrong_way_count = 0
 
     terminated, truncated, term_reason = _check_termination(cfg.limits, car, timing, off_track_m)
-    if terminated and term_reason in ("offtrack", "wrong_way"):
+    # Phase 6 opt-in crash-out: a hard contact ends the car with the same failure penalty path.
+    if (
+        not terminated
+        and cfg.collision.crashout_enabled
+        and car.contact.closing_mps > cfg.collision.crashout_closing_speed_mps
+    ):
+        terminated, term_reason = True, "crashout"
+    if terminated and term_reason in ("offtrack", "wrong_way", "crashout"):
         reward += cfg.limits.failure_reward
         terms["failure"] = cfg.limits.failure_reward
         terms["total"] = reward
 
-    obs = _build_obs(entry, cfg, car)
+    obs = _build_obs(entry, cfg, car, neighbor_block=neighbor_block)
     info = {
         "lap_time": timing.lap_time,
         "off_track": off_track_m,
@@ -294,14 +336,37 @@ def step_one_car(
         "reward_terms": terms,
         "termination": term_reason,
         "steps": car.step_count,
-        "grip": grip,
+        "grip": car.last_grip,
         "tire_wear": car.state.tire_wear,
         "compound": car.state.compound,
         "weather": cfg.conditions.weather,
         "circuit_id": entry.track_id,
         "pole_time_s": entry.pole_time_s,
+        # Phase 6 racing fields. The single-agent / one-car path leaves these neutral; the
+        # field step overrides race_position / gap_ahead_s from the field ranking.
+        "contact": float(car.contact.impulse),
+        "contact_closing_mps": float(car.contact.closing_mps),
+        "overtakes": max(0, int(places)),
+        "race_position": 1,
+        "gap_ahead_s": None,
     }
     return obs, float(reward), bool(terminated), bool(truncated), info
+
+
+def step_one_car(
+    entry: CircuitEntry,
+    cfg: CarStepConfig,
+    car: CarRuntime,
+    action: np.ndarray,
+) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    """One car, one control step = advance physics + (no collision) + finalize.
+
+    The single-agent contract: one car cannot collide and has a constant rank, so this is the
+    exact legacy ``RacingEnv.step`` math at the new obs length (an all-zero neighbor block and
+    ``reward_v3`` reducing to ``reward_v2``). ``RacingEnv`` keeps calling this unchanged.
+    """
+    advance_car_physics(entry, cfg, car, action)
+    return finalize_car_step(entry, cfg, car)
 
 
 def _map_action(action: np.ndarray) -> tuple[float, float]:
@@ -325,13 +390,28 @@ def _step_grip(entry: CircuitEntry, cfg: CarStepConfig, car: CarRuntime) -> floa
     )
 
 
-def _build_obs(entry: CircuitEntry, cfg: CarStepConfig, car: CarRuntime) -> np.ndarray:
-    """ObservationV2 at the car state, with the grip indicator from the last projection."""
+def _build_obs(
+    entry: CircuitEntry,
+    cfg: CarStepConfig,
+    car: CarRuntime,
+    *,
+    neighbor_block: np.ndarray | None = None,
+) -> np.ndarray:
+    """ObservationV3 at the car state, with the grip indicator + a precomputed neighbor block.
+
+    ``neighbor_block`` is the field's encoding of this car's K nearest neighbors (the obs builder
+    stays field-agnostic). ``None`` (the single-agent / one-car path) leaves an all-zero tail.
+    """
     grip_ind = cfg.conditions.grip_indicator(
         entry.track, car.grip_idx, car.grip_lat, car.state.tire_wear, car.state.compound
     )
     return build_observation(
-        entry.track, car.state, cfg.obs_params, entry.edge_cache, grip_indicator=grip_ind
+        entry.track,
+        car.state,
+        cfg.obs_params,
+        entry.edge_cache,
+        grip_indicator=grip_ind,
+        neighbor_block=neighbor_block,
     )
 
 
@@ -420,7 +500,7 @@ class RacingEnv(gym.Env):
         self.recorder = recorder
 
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
-        self.observation_space = observation_space()
+        self.observation_space = observation_space(self.obs_params)
 
         # Build an initial car so `self.state` exists before the first reset.
         self._car, _obs, _timing = reset_car(self._entry, self._car_cfg, 0, self.lap_timer)
@@ -515,6 +595,18 @@ class RacingEnv(gym.Env):
         if weather is not None:
             self._weather_mode = str(weather)
 
+    def apply_reward_weights(
+        self, *, w_contact: float | None = None, w_overtake: float | None = None
+    ) -> None:
+        """Curriculum hook: ramp the racing reward weights in place (no obs-layout change).
+
+        Reads take effect from the next ``finalize`` (the step config is read fresh each step),
+        so a run can learn to coexist (contact penalty on) before it learns to fight (overtake
+        reward ramped up). Pure reward-shaping change; safe mid-run.
+        """
+        apply_reward_weights(self._car_cfg, w_contact=w_contact, w_overtake=w_overtake)
+        self.reward_weights = self._car_cfg.reward_weights
+
     def _resolve_weather(self) -> None:
         """Set the episode weather: a fixed condition, or sample wet with ``p_wet`` if sampled."""
         resolve_weather(self._car_cfg, self._weather_mode, self.np_random)
@@ -568,6 +660,27 @@ def apply_conditions(
             import dataclasses
 
             cfg.physics.params = dataclasses.replace(params, wear_rate=float(wear_rate))
+
+
+def apply_reward_weights(
+    cfg: CarStepConfig, *, w_contact: float | None = None, w_overtake: float | None = None
+) -> None:
+    """Replace the shared :class:`RewardWeights` in place with the ramped racing weights.
+
+    ``CarStepConfig`` and ``RewardWeights`` are frozen, so this rebuilds the weights with the
+    overrides and swaps them via ``object.__setattr__`` (the same in-place transport the
+    curriculum uses for conditions). ``None`` leaves a weight unchanged.
+    """
+    import dataclasses
+
+    changes: dict[str, float] = {}
+    if w_contact is not None:
+        changes["w_contact"] = float(w_contact)
+    if w_overtake is not None:
+        changes["w_overtake"] = float(w_overtake)
+    if changes:
+        new_weights = dataclasses.replace(cfg.reward_weights, **changes)
+        object.__setattr__(cfg, "reward_weights", new_weights)
 
 
 def resolve_weather(cfg: CarStepConfig, weather_mode: str, rng: np.random.Generator) -> None:

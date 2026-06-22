@@ -58,7 +58,7 @@ def test_spaces_are_the_unchanged_boxes():
     obs_space = env.observation_space("car_0")
     act_space = env.action_space("car_0")
     assert obs_space.shape == (OBS_DIM,)
-    assert OBS_DIM == 22 and OBS_VERSION == 2  # no nearby-car block this phase
+    assert OBS_DIM == 42 and OBS_VERSION == 3  # Phase 6: v2 prefix(22) + K=4 neighbor block
     assert act_space.shape == (2,)
     assert np.all(act_space.low == -1.0) and np.all(act_space.high == 1.0)
     # Homogeneous: every agent has the identical observation/action space.
@@ -198,3 +198,149 @@ def test_non_positive_n_agents_refused():
 def test_unbuilt_circuit_refused():
     with pytest.raises(FileNotFoundError):
         _make(2, overrides=["circuits.pool=[definitely_not_a_real_circuit]"])
+
+
+# ----- Phase 6: racing (collisions + neighbor block + zero-sum overtake) -----------------
+
+_RACING = [
+    "collision.enabled=true",
+    "reward.version=3",
+    "reward.w_contact=1.0",
+    "reward.w_overtake=0.5",
+]
+
+
+def test_parallel_api_test_with_racing_on():
+    # The API still conforms with collisions + the neighbor block + reward_v3 all live.
+    from pettingzoo.test import parallel_api_test
+
+    env = _make(4, seed=0, overrides=_RACING)
+    parallel_api_test(env, num_cycles=30)
+
+
+def test_one_car_field_reproduces_single_agent_with_racing_on():
+    # A one-car field cannot collide and holds a constant rank, so reward_v3 reduces to reward_v2
+    # and the all-zero neighbor block leaves the obs unchanged: it must match RacingEnv step-for-
+    # step on the same start + actions, even with collisions + racing weights enabled.
+    cfg = _cfg(_RACING)
+    single = RacingEnv(cfg, seed=11)
+    o_s, _ = single.reset(seed=11, options={"start_index": 250})
+
+    field = _make(1, seed=11, overrides=_RACING)
+    o_f, _ = field.reset(seed=11, options={"start_indices": [250]})
+    np.testing.assert_allclose(o_f["car_0"], o_s, rtol=1e-6, atol=1e-6)
+
+    rng = np.random.RandomState(0)
+    for _ in range(40):
+        act = rng.uniform(-1.0, 1.0, size=2).astype(np.float32)
+        o_s, r_s, term_s, trunc_s, _ = single.step(act)
+        o_f, r_f, term_f, trunc_f, _ = field.step({"car_0": act})
+        np.testing.assert_allclose(o_f["car_0"], o_s, rtol=1e-5, atol=1e-5)
+        assert r_f["car_0"] == pytest.approx(r_s, abs=1e-6)
+        assert term_f["car_0"] == term_s and trunc_f["car_0"] == trunc_s
+        if term_s or trunc_s:
+            break
+
+
+def test_field_obs_carries_neighbor_block_when_cars_are_close():
+    # With >1 car the tail is no longer all-zero for cars within sensing range (grid start packs
+    # them together), and the racing info fields are present.
+    env = _make(4, seed=1, overrides=_RACING)
+    env.grid = replace(env.grid, reset_mode="grid")
+    obs, infos = env.reset(seed=1)
+    has_neighbors = any(np.any(obs[a][22:] != 0.0) for a in env.possible_agents)
+    assert has_neighbors, "a close field has neighbors in its obs tail"
+    for a in env.possible_agents:
+        assert "race_position" in infos[a]
+    # Distinct ranks across the grid (1..N).
+    ranks = sorted(infos[a]["race_position"] for a in env.possible_agents)
+    assert ranks == list(range(1, len(env.possible_agents) + 1))
+
+
+def test_step_info_has_racing_fields():
+    env = _make(3, seed=2, overrides=_RACING)
+    env.reset(seed=2)
+    acts = {a: np.array([0.0, 1.0], dtype=np.float32) for a in env.agents}
+    _o, _r, _t, _tr, infos = env.step(acts)
+    for a in env.agents:
+        info = infos[a]
+        assert "contact" in info and "race_position" in info and "gap_ahead_s" in info
+        assert 1 <= info["race_position"] <= 3
+
+
+def test_crashout_is_opt_in():
+    # A hard contact ends a car ONLY when collision.crashout_enabled — the opt-in safety valve.
+    from f1rl.env.collisions import ContactRecord
+    from f1rl.env.single_agent import finalize_car_step
+
+    over = _RACING + [
+        "collision.crashout_enabled=true",
+        "collision.crashout_closing_speed_mps=10.0",
+    ]
+    env = _make(2, seed=3, overrides=over)
+    env.reset(seed=3)
+    entry, cfg, car = env._entry, env._car_cfg, env._cars["car_0"]
+
+    # A clean step: not terminated for crashout.
+    car.contact = ContactRecord()
+    _o, _r, term_clean, _tr, info_clean = finalize_car_step(entry, cfg, car)
+    assert not (term_clean and info_clean["termination"] == "crashout")
+
+    # A hard contact above the threshold: crashed out.
+    car.contact = ContactRecord(impulse=20.0, closing_mps=25.0, count=1)
+    _o, reward, term_hard, _tr, info_hard = finalize_car_step(entry, cfg, car)
+    assert term_hard and info_hard["termination"] == "crashout"
+    assert reward <= cfg.limits.failure_reward + 1.0  # the failure penalty was applied
+
+
+def test_crashout_off_by_default_keeps_hard_contact_racing():
+    from f1rl.env.collisions import ContactRecord
+    from f1rl.env.single_agent import finalize_car_step
+
+    env = _make(2, seed=4, overrides=_RACING)  # crashout_enabled defaults false
+    env.reset(seed=4)
+    entry, cfg, car = env._entry, env._car_cfg, env._cars["car_0"]
+    car.contact = ContactRecord(impulse=20.0, closing_mps=25.0, count=1)
+    _o, _r, _term, _tr, info = finalize_car_step(entry, cfg, car)
+    assert info["termination"] != "crashout"  # penalized, not terminal
+
+
+# ----- zero-sum overtake / rank helpers (pure functions) --------------------------------
+
+
+def test_totals_to_ranks_orders_by_progress_descending():
+    from f1rl.env.multi_agent import totals_to_ranks
+
+    ranks = totals_to_ranks({"car_0": 10.0, "car_1": 30.0, "car_2": 20.0})
+    assert ranks == {"car_1": 1, "car_2": 2, "car_0": 3}
+
+
+def test_rank_and_overtakes_is_zero_sum_for_a_genuine_swap():
+    from f1rl.env.multi_agent import rank_and_overtakes
+
+    # car_0 was ahead (rank 1) but car_1 is now ahead by a hair (within battle range): a swap.
+    prev = {"car_0": 1, "car_1": 2}
+    totals = {"car_0": 100.0, "car_1": 105.0}
+    ranks_now, places = rank_and_overtakes(totals, prev, battle_range_m=20.0)
+    assert ranks_now == {"car_1": 1, "car_0": 2}
+    assert places["car_1"] == 1 and places["car_0"] == -1  # zero-sum across the pair
+    assert places["car_0"] + places["car_1"] == 0
+
+
+def test_rank_and_overtakes_ignores_far_apart_shuffle():
+    from f1rl.env.multi_agent import rank_and_overtakes
+
+    # Order flipped but the cars are 80 m apart (e.g. lapping): not a wheel-to-wheel swap.
+    prev = {"car_0": 1, "car_1": 2}
+    totals = {"car_0": 100.0, "car_1": 180.0}
+    _ranks, places = rank_and_overtakes(totals, prev, battle_range_m=20.0)
+    assert places["car_0"] == 0 and places["car_1"] == 0
+
+
+def test_rank_and_overtakes_no_change_no_places():
+    from f1rl.env.multi_agent import rank_and_overtakes
+
+    prev = {"car_0": 1, "car_1": 2}
+    totals = {"car_0": 110.0, "car_1": 100.0}  # same order as prev
+    _ranks, places = rank_and_overtakes(totals, prev, battle_range_m=20.0)
+    assert places == {"car_0": 0, "car_1": 0}

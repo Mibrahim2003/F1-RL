@@ -53,7 +53,7 @@ def test_observation_space_is_box_of_obs_dim(cfg):
     space = env.observation_space
     assert isinstance(space, gym.spaces.Box)
     assert space.shape == (OBS_DIM,)
-    assert OBS_DIM == 22  # ObservationV2 (Phase 3b): v1(15) + wear + compound_onehot[5] + grip
+    assert OBS_DIM == 42  # ObservationV3 (Phase 6): v2 prefix(22) + K=4 neighbor block(4*5)
 
 
 def test_dynamic_env_passes_checker(dyn_cfg):

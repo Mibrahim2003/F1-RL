@@ -26,6 +26,7 @@ from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDiscon
 from fastapi.middleware.cors import CORSMiddleware
 from omegaconf import DictConfig
 
+from f1rl.env.collisions import CollisionParams
 from f1rl.env.conditions import Conditions
 from f1rl.physics import make_physics
 from f1rl.server.messages import (
@@ -158,6 +159,8 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
     field_lateral_m = float(grid_get("grid_lateral_m", 3.0))
     _team_colors_cfg = grid_get("team_colors", None)
     field_team_colors = tuple(str(c) for c in _team_colors_cfg) if _team_colors_cfg else None
+    # Phase 6: the live field collision pass (disabled by default => the Phase 5 blind parade).
+    field_collision = CollisionParams.from_config(cfg)
 
     def track_meta(track_id: str) -> tuple[Track, float, int]:
         """Load a circuit + its pace meta. Raises ``FileNotFoundError`` if not built."""
@@ -317,6 +320,7 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
                     reset_mode=field_reset_mode,
                     grid_spacing_m=field_spacing_m,
                     grid_lateral_m=field_lateral_m,
+                    collision=field_collision,
                     **kwargs,
                 )
             else:

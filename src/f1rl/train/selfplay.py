@@ -76,6 +76,9 @@ class SelfPlayCurriculumCallback(CurriculumCallback):
             )
             if stage.circuits is not None:
                 r.set_track_pool(list(stage.circuits))
+            # Phase 6: ramp the racing reward weights in place (coexist -> race).
+            if stage.w_contact is not None or stage.w_overtake is not None:
+                r.apply_reward_weights(w_contact=stage.w_contact, w_overtake=stage.w_overtake)
 
         nan = float("nan")
         n_circuits = float(len(stage.circuits)) if stage.circuits is not None else nan
@@ -84,6 +87,10 @@ class SelfPlayCurriculumCallback(CurriculumCallback):
             "curriculum/mu_base": float(stage.mu_base) if stage.mu_base is not None else nan,
             "curriculum/wear_rate": float(stage.wear_rate) if stage.wear_rate is not None else nan,
             "curriculum/n_circuits": n_circuits,
+            "curriculum/w_contact": float(stage.w_contact) if stage.w_contact is not None else nan,
+            "curriculum/w_overtake": float(stage.w_overtake)
+            if stage.w_overtake is not None
+            else nan,
         }
         if self.run_logger is not None:
             self.run_logger.log(payload, step=int(self.num_timesteps))
@@ -91,7 +98,8 @@ class SelfPlayCurriculumCallback(CurriculumCallback):
             print(
                 f"[curriculum] step={self.num_timesteps} -> stage@{stage.start_step} "
                 f"mu_base={stage.mu_base} wear_rate={stage.wear_rate} weather={stage.weather} "
-                f"circuits={list(stage.circuits) if stage.circuits is not None else 'unchanged'}"
+                f"circuits={list(stage.circuits) if stage.circuits is not None else 'unchanged'} "
+                f"w_contact={stage.w_contact} w_overtake={stage.w_overtake}"
             )
 
 
@@ -143,10 +151,17 @@ def selfplay(
     config_name: str = "calendar_selfplay",
     overrides: list[str] | None = None,
     resume: str | None = None,
+    warm_start: str | None = None,
     run_name: str | None = None,
     output_root: str | Path = "runs",
 ) -> Any:
-    """Run (or resume/warm-start) a self-play PPO job from config; returns the trained model."""
+    """Run / resume / grow-warm-start a self-play PPO job from config; returns the trained model.
+
+    ``--resume`` validates and continues a v3 checkpoint (timestep count carried). ``--warm-start``
+    is the Phase 6 transplant: it **grows** a Phase 5 (v2) policy's input layer into a fresh v3
+    policy (see :func:`f1rl.train.warmstart.grow_policy`), starting a new timestep count — the only
+    sanctioned way to bring the competent driver across the ``OBS_VERSION`` 2 -> 3 bump.
+    """
     cfg = load_experiment_config(config_name, overrides=overrides)
     seed = int(_cfg_get(cfg, "seed", 42))
     seed_everything(seed)
@@ -164,13 +179,24 @@ def selfplay(
     )
 
     try:
-        if resume:
-            device = str(_cfg_get(cfg, "device", "cpu"))
+        device = str(_cfg_get(cfg, "device", "cpu"))
+        if warm_start:
+            from f1rl.train.warmstart import grow_policy
+
+            model, meta = grow_policy(warm_start, venv, cfg, seed, device=device)
+            model.set_env(venv)
+            reset_num_timesteps = True  # a fresh v3 policy: start the timestep count at 0
+            print(
+                f"[selfplay] grown warm start from {warm_start} "
+                f"(src obs_version={meta.get('obs_version')}, n_agents={meta.get('n_agents')}) "
+                f"into a {n_agents}-car v3 field"
+            )
+        elif resume:
             model, meta = load_checkpoint(resume, env=venv, device=device)
             model.set_env(venv)
             reset_num_timesteps = False
             print(
-                f"[selfplay] warm-started from {resume} "
+                f"[selfplay] resumed from {resume} "
                 f"(obs_version={meta.get('obs_version')}, n_agents={meta.get('n_agents')}) "
                 f"into a {n_agents}-car field @ {meta['total_timesteps']} steps"
             )
@@ -247,7 +273,12 @@ def throughput_report(
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Self-play PPO training for a field (Phase 5).")
     p.add_argument("--config", default="calendar_selfplay", help="experiment config name")
-    p.add_argument("--resume", default=None, help="checkpoint dir to warm-start / resume from")
+    p.add_argument("--resume", default=None, help="v3 checkpoint dir to validate + resume from")
+    p.add_argument(
+        "--warm-start",
+        default=None,
+        help="Phase 5 (v2) checkpoint dir to grow into a fresh v3 policy (input-layer transplant)",
+    )
     p.add_argument("--run-name", default=None, help="optional run name")
     p.add_argument("--output-root", default="runs", help="root dir for run artifacts")
     p.add_argument("--throughput", action="store_true", help="measure SPS vs single-agent and exit")
@@ -274,6 +305,7 @@ def main(argv: list[str] | None = None) -> None:
         config_name=args.config,
         overrides=list(args.overrides) or None,
         resume=args.resume,
+        warm_start=args.warm_start,
         run_name=args.run_name,
         output_root=args.output_root,
     )

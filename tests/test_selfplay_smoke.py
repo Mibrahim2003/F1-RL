@@ -39,7 +39,7 @@ def test_supersuit_wraps_into_sb3_trainable_vec_env():
         # The field flattens to one sub-env per car; the spaces are the unchanged single-agent
         # boxes, so one shared policy trains across every car (parameter sharing).
         assert venv.num_envs == 2 * 2
-        assert venv.observation_space.shape == (22,)
+        assert venv.observation_space.shape == (42,)  # ObservationV3 (Phase 6): 22 + K=4 * 5
         assert venv.action_space.shape == (2,)
 
         model = PPO("MlpPolicy", venv, seed=0, n_steps=64, batch_size=64, n_epochs=1, device="cpu")
@@ -63,11 +63,11 @@ def test_supersuit_visible_width_is_constant_under_early_death():
         width = venv.num_envs
         assert width == 3
         obs = venv.reset()
-        assert obs.shape == (width, 22)
+        assert obs.shape == (width, 42)
         actions = np.stack([venv.action_space.sample() for _ in range(width)])
         for _ in range(15):  # crosses the 5-step truncation and the auto-reset
             obs, rewards, dones, infos = venv.step(actions)
-            assert obs.shape == (width, 22)
+            assert obs.shape == (width, 42)
             assert len(rewards) == width and len(dones) == width
     finally:
         venv.close()

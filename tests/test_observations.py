@@ -78,19 +78,23 @@ def _on_centerline_state(track, idx, speed=30.0):
 
 
 def test_observation_space_shape_and_dim():
+    # Phase 6: OBS_VERSION 3, length 22 + K*5 (default K=4 -> 42).
     space = observation_space()
     assert space.shape == (OBS_DIM,)
-    assert OBS_DIM == 22
-    assert OBS_VERSION == 2
+    assert OBS_DIM == 42
+    assert OBS_VERSION == 3
 
 
-def test_build_observation_shape_22(track, cfg):
+def test_build_observation_shape_v3(track, cfg):
     params = _params(cfg)
     state = _on_centerline_state(track, idx=0)
     obs = build_observation(track, state, params, _edge_cache(track))
     assert isinstance(obs, np.ndarray)
-    assert obs.shape == (22,)
+    assert obs.shape == (params.obs_dim,)
+    assert params.obs_dim == 22 + params.k_neighbors * 5
     assert obs.dtype.kind == "f"
+    # A lone car (no precomputed neighbor block) observes an all-zero tail.
+    assert np.all(obs[22:] == 0.0)
 
 
 # --- ObservationV2 tail: wear, compound one-hot, grip indicator (Phase 3b) ----------------
@@ -365,7 +369,7 @@ def test_same_state_same_shape_and_in_bounds_on_two_circuits(cfg):
         t = load_track(tid, tracks_dir=_TRACKS_DIR)
         st = _on_centerline_state(t, idx=len(t.centerline) // 4, speed=50.0)
         obs = build_observation(t, st, params, _edge_cache(t))
-        assert obs.shape == (22,)
+        assert obs.shape == (params.obs_dim,)
         assert space.contains(obs.astype(space.dtype)), tid
         checked += 1
     assert checked >= 2  # the lock is meaningful only across multiple circuits
@@ -386,3 +390,82 @@ def test_speed_norm_increases_with_speed(track, cfg):
     )
     assert rest[I_SPEED] == pytest.approx(0.0, abs=1e-6)
     assert fast[I_SPEED] > slow[I_SPEED] > 0.0
+
+
+# --- Phase 6: the neighbor block (ObservationV3 tail) -----------------------------------
+
+from f1rl.env.observations import build_neighbor_block  # noqa: E402
+
+NB_FEATS = 5
+
+
+def _free_state(x, y, yaw=0.0, vx=0.0, vy=0.0):
+    return CarState(x=float(x), y=float(y), yaw=float(yaw), vx=float(vx), vy=float(vy))
+
+
+def test_obs_prefix_byte_identical_with_and_without_block(track, cfg):
+    # The warm-start property: the [0:22] prefix is identical whether or not a neighbor block
+    # is supplied (the block is purely additive at the tail).
+    params = _params(cfg)
+    state = _on_centerline_state(track, idx=len(track.centerline) // 3, speed=40.0)
+    others = [_free_state(state.x + 8.0, state.y + 1.0, vx=30.0)]
+    block = build_neighbor_block(state, others, params)
+    obs_none = build_observation(track, state, params, _edge_cache(track))
+    obs_block = build_observation(track, state, params, _edge_cache(track), neighbor_block=block)
+    np.testing.assert_array_equal(obs_none[0:22], obs_block[0:22])
+    assert not np.array_equal(obs_block[22:], obs_none[22:])  # the block actually changed the tail
+
+
+def test_neighbor_block_nearest_first_zero_padded(cfg):
+    params = ObsParams.from_config(cfg)
+    obs = _free_state(0.0, 0.0, yaw=0.0)
+    # Two neighbors ahead within range R (default 50 m); near one closer than far one.
+    near = _free_state(10.0, 0.0)
+    far = _free_state(30.0, 0.0)
+    block = build_neighbor_block(obs, [far, near], params)
+    assert block.shape == (params.k_neighbors * NB_FEATS,)
+    # slot 0 = nearest (10 m), slot 1 = farther (30 m), both valid; the rest zero-padded.
+    assert block[0 * NB_FEATS + 4] == 1.0 and block[1 * NB_FEATS + 4] == 1.0
+    assert block[0 * NB_FEATS + 0] < block[1 * NB_FEATS + 0]  # dx/R smaller for the nearer car
+    for slot in range(2, params.k_neighbors):
+        assert np.all(block[slot * NB_FEATS : (slot + 1) * NB_FEATS] == 0.0)
+
+
+def test_neighbor_beyond_range_excluded(cfg):
+    params = ObsParams.from_config(cfg)
+    obs = _free_state(0.0, 0.0)
+    beyond = _free_state(params.neighbor_range_m + 25.0, 0.0)
+    block = build_neighbor_block(obs, [beyond], params)
+    assert np.all(block == 0.0)  # nothing within range -> all-zero block
+
+
+def test_lone_car_zero_block(cfg):
+    params = ObsParams.from_config(cfg)
+    block = build_neighbor_block(_free_state(5.0, 5.0, yaw=1.0), [], params)
+    assert block.shape == (params.k_neighbors * NB_FEATS,)
+    assert np.all(block == 0.0)
+
+
+def test_neighbor_block_local_relative_invariant_under_rigid_transform(cfg):
+    # Local/relative only: translating + rotating the whole field leaves each car's block
+    # invariant (no absolute position leaks). Body-frame velocities are unchanged by a world
+    # rotation, so only positions rotate/translate and yaws shift by theta.
+    params = ObsParams.from_config(cfg)
+    obs = _free_state(3.0, -2.0, yaw=0.4, vx=25.0, vy=1.0)
+    others = [
+        _free_state(15.0, 4.0, yaw=0.2, vx=30.0, vy=-2.0),
+        _free_state(-6.0, 9.0, yaw=-1.1, vx=10.0, vy=0.0),
+    ]
+    block = build_neighbor_block(obs, others, params)
+
+    theta = 0.7
+    tx, ty = 1234.0, -567.0
+    c, s = math.cos(theta), math.sin(theta)
+
+    def xf(st):
+        nx = c * st.x - s * st.y + tx
+        ny = s * st.x + c * st.y + ty
+        return _free_state(nx, ny, yaw=st.yaw + theta, vx=st.vx, vy=st.vy)
+
+    block_t = build_neighbor_block(xf(obs), [xf(o) for o in others], params)
+    np.testing.assert_allclose(block, block_t, atol=1e-5)

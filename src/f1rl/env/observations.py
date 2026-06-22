@@ -1,4 +1,4 @@
-"""ObservationV1 builder — pure NumPy (TECHNICAL_DESIGN.md §7, plan ObservationV1 table).
+"""Observation builder — pure NumPy (TECHNICAL_DESIGN.md §7, plan ObservationV1/V3 tables).
 
 This module is the single source of the observation the policy sees, and it is reused
 **verbatim** by the server's live-policy path. To keep the training stack out of the
@@ -6,21 +6,30 @@ server's hot path it imports **no torch and no gymnasium in the heavy path** —
 ``observation_space()`` imports ``gymnasium.spaces`` lazily so the builder itself stays a
 plain NumPy function.
 
-Layout (length 22), fixed for ``OBS_VERSION = 2``::
+Layout, ``OBS_VERSION = 3`` (Phase 6), length ``22 + K*5`` (default 42 with K=4)::
 
-    [ speed_norm,             # 0    vx / ref_speed
+    [0:22]  ObservationV2 prefix, BYTE-IDENTICAL to OBS_VERSION = 2:
+      speed_norm,             # 0    vx / ref_speed
       heading_error,          # 1    wrap(yaw - tangent_angle) / pi
       lateral_offset_norm,    # 2    (signed lateral) / half_width_on_that_side  (input only)
       curvature_lookahead[5], # 3-7  signed curvature at s + {10,25,50,100,150} m, x curvature_scale
       edge_beam[7],           # 8-14 rangefinder distance to asphalt edge / beam_max, clipped [0,1]
       tire_wear,              # 15   state.tire_wear, already [0,1]               (Part 2)
       compound_onehot[5],     # 16-20 one-hot of state.compound (0 soft .. 4 wet) (Part 2)
-      grip_indicator ]        # 21   effective grip at the car / mu_base, clipped (Part 2)
+      grip_indicator,         # 21   effective grip at the car / mu_base, clipped (Part 2)
+    [22 : 22+K*5]  Phase 6 neighbor block — K nearest cars, nearest-first, zero-padded:
+      per neighbor (in the OBSERVER body frame, F = 5):
+        dx_body / R,  dy_body / R,        # relative position forward/left, clip [-1, 1]
+        dvx_body / vref, dvy_body / vref, # relative velocity forward/left, clip [-2, 2]
+        valid                             # 1 = real neighbor within range R, else 0
 
-The v1 slice (0-14) is **byte-identical** to ``OBS_VERSION = 1``; only the tail is new. Every
-tunable (reference speed, lookahead distances, beam angles, beam range, curvature scale) comes
-from :class:`ObsParams`, built from config — no magic constant in logic. SI units throughout
-(meters, m/s, radians).
+The v1 slice (0-14) is byte-identical to ``OBS_VERSION = 1``; the v2 tail (15-21) is byte-
+identical to ``OBS_VERSION = 2``; the neighbor block is purely additive at ``[22:]`` and is
+**local/relative only** (no absolute position) so one policy still generalizes across the
+calendar. A lone car (or a one-car field) observes an all-zero neighbor block. Every tunable
+(reference speed, lookahead distances, beam angles, beam range, curvature scale, K, sensing
+range, velocity reference) comes from :class:`ObsParams`, built from config — no magic constant
+in logic. SI units throughout (meters, m/s, radians).
 """
 
 from __future__ import annotations
@@ -33,8 +42,11 @@ import numpy as np
 
 from f1rl.track.schema import Track
 
-OBS_VERSION = 2
-OBS_DIM = 22
+OBS_VERSION = 3
+BASE_OBS_DIM = 22  # the ObservationV2 prefix [0:22], unchanged and byte-identical to v2
+NEIGHBOR_FEATS = 5  # per-neighbor F: [dx/R, dy/R, dvx/vref, dvy/vref, valid] in the observer frame
+_DEFAULT_K_NEIGHBORS = 4
+OBS_DIM = BASE_OBS_DIM + _DEFAULT_K_NEIGHBORS * NEIGHBOR_FEATS  # default 42 (K = 4)
 N_COMPOUNDS = 5  # soft, medium, hard, intermediate, wet — one-hot of CarState.compound
 
 # Default obs parameters (all overridable from config under the ``obs:`` block).
@@ -55,6 +67,10 @@ _BEAM_HI = 1.0
 _WEAR_LO, _WEAR_HI = 0.0, 1.0
 _ONEHOT_LO, _ONEHOT_HI = 0.0, 1.0
 _GRIP_IND_LO, _GRIP_IND_HI = 0.0, 2.0  # normalized grip / mu_base, clipped (matches Conditions)
+# Phase 6 neighbor-block bounds (per neighbor): relative position, relative velocity, validity.
+_NB_POS_HI = 1.0  # dx/dy normalized by sensing range R, clipped [-1, 1]
+_NB_VEL_HI = 2.0  # dvx/dvy normalized by vref, clipped [-2, 2]
+_NB_VALID_LO, _NB_VALID_HI = 0.0, 1.0
 
 
 @dataclass(frozen=True)
@@ -66,12 +82,21 @@ class ObsParams:
     beam_angles_deg: tuple[float, ...] = _DEFAULT_BEAM_ANGLES_DEG
     beam_max: float = _DEFAULT_BEAM_MAX
     curvature_scale: float = _DEFAULT_CURVATURE_SCALE
+    # Phase 6 neighbor block (ObservationV3 tail).
+    k_neighbors: int = _DEFAULT_K_NEIGHBORS  # K nearest cars encoded at the tail (0 => no tail)
+    neighbor_range_m: float = 50.0  # sensing range R (m); a car beyond R is not a neighbor
+    neighbor_vref: float = _DEFAULT_REF_SPEED  # m/s; normalizes relative velocity (dv / vref)
     # Beam angles in radians, derived once at construction (not read from config directly).
     beam_angles_rad: np.ndarray = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         rad = np.radians(np.asarray(self.beam_angles_deg, dtype=np.float64))
         object.__setattr__(self, "beam_angles_rad", rad)
+
+    @property
+    def obs_dim(self) -> int:
+        """Total observation length for these params: ``22 + K*5`` (the v3 layout)."""
+        return BASE_OBS_DIM + int(self.k_neighbors) * NEIGHBOR_FEATS
 
     @classmethod
     def from_config(cls, cfg: Any) -> ObsParams:
@@ -91,12 +116,16 @@ class ObsParams:
         if len(angles) != 7:
             raise ValueError(f"obs.beam_angles_deg must have 7 entries, got {len(angles)}")
 
+        ref_speed = float(get("ref_speed", cls.ref_speed))
         return cls(
-            ref_speed=float(get("ref_speed", cls.ref_speed)),
+            ref_speed=ref_speed,
             lookahead_m=lookahead,
             beam_angles_deg=angles,
             beam_max=float(get("beam_max", cls.beam_max)),
             curvature_scale=float(get("curvature_scale", cls.curvature_scale)),
+            k_neighbors=int(get("k_neighbors", cls.k_neighbors)),
+            neighbor_range_m=float(get("neighbor_range_m", cls.neighbor_range_m)),
+            neighbor_vref=float(get("neighbor_vref", ref_speed)),
         )
 
 
@@ -116,12 +145,18 @@ class EdgeCache:
     seg_d: np.ndarray  # (M, 2) segment direction vectors (end - start)
 
 
-def observation_space():
-    """Return the ObservationV1 :class:`gymnasium.spaces.Box` (lazy gymnasium import)."""
+def observation_space(params: ObsParams | None = None):
+    """Return the ObservationV3 :class:`gymnasium.spaces.Box` (lazy gymnasium import).
+
+    ``params`` sizes the neighbor block (``K = params.k_neighbors``); when omitted the default
+    length-42 (K = 4) layout is used. The ``[0:22]`` bounds are byte-identical to v2.
+    """
     import gymnasium.spaces as spaces
 
-    low = np.empty(OBS_DIM, dtype=np.float32)
-    high = np.empty(OBS_DIM, dtype=np.float32)
+    k = _DEFAULT_K_NEIGHBORS if params is None else int(params.k_neighbors)
+    dim = BASE_OBS_DIM + k * NEIGHBOR_FEATS
+    low = np.empty(dim, dtype=np.float32)
+    high = np.empty(dim, dtype=np.float32)
     low[0], high[0] = -_SPEED_HI, _SPEED_HI
     low[1], high[1] = -_HEADING_HI, _HEADING_HI
     low[2], high[2] = -_LATERAL_HI, _LATERAL_HI
@@ -130,7 +165,15 @@ def observation_space():
     low[15], high[15] = _WEAR_LO, _WEAR_HI
     low[16:21], high[16:21] = _ONEHOT_LO, _ONEHOT_HI
     low[21], high[21] = _GRIP_IND_LO, _GRIP_IND_HI
-    return spaces.Box(low=low, high=high, shape=(OBS_DIM,), dtype=np.float32)
+    # Phase 6 neighbor block: per neighbor [dx, dy, dvx, dvy, valid].
+    for slot in range(k):
+        b = BASE_OBS_DIM + slot * NEIGHBOR_FEATS
+        low[b + 0], high[b + 0] = -_NB_POS_HI, _NB_POS_HI
+        low[b + 1], high[b + 1] = -_NB_POS_HI, _NB_POS_HI
+        low[b + 2], high[b + 2] = -_NB_VEL_HI, _NB_VEL_HI
+        low[b + 3], high[b + 3] = -_NB_VEL_HI, _NB_VEL_HI
+        low[b + 4], high[b + 4] = _NB_VALID_LO, _NB_VALID_HI
+    return spaces.Box(low=low, high=high, shape=(dim,), dtype=np.float32)
 
 
 def build_edge_cache(track: Track) -> EdgeCache:
@@ -251,19 +294,85 @@ def cast_beams(
     return out
 
 
+def build_neighbor_block(observer: Any, others: list[Any], params: ObsParams) -> np.ndarray:
+    """Encode the K nearest other cars as the ObservationV3 tail (length ``K*5``).
+
+    Each neighbor is encoded **local/relative in the observer's body frame**: relative position
+    (forward/left, normalized by the sensing range R) and relative velocity (forward/left,
+    normalized by ``neighbor_vref``), plus a validity bit. Neighbors are sorted nearest-first by
+    center distance, only those within R are kept, and unused slots are zero (``valid = 0``).
+    No absolute position ever appears — the block is invariant to translating/rotating the whole
+    field up to the observer's own frame, so it does not break track-agnostic generalization.
+
+    ``observer``/``others`` are :class:`~f1rl.physics.base.CarState` (body-frame ``vx``/``vy``).
+    A lone car (empty ``others``) — or ``k_neighbors == 0`` — yields an all-zero block.
+    """
+    k = int(params.k_neighbors)
+    block = np.zeros(k * NEIGHBOR_FEATS, dtype=np.float32)
+    if k == 0 or not others:
+        return block
+
+    rng = params.neighbor_range_m if params.neighbor_range_m > 0.0 else 1.0
+    vref = params.neighbor_vref if params.neighbor_vref > 0.0 else 1.0
+
+    ox, oy, oyaw = float(observer.x), float(observer.y), float(observer.yaw)
+    of, os_ = math.cos(oyaw), math.sin(oyaw)  # observer forward axis (cos, sin)
+    # observer world velocity from its body-frame (vx forward, vy left)
+    ovx_w = float(observer.vx) * of - float(observer.vy) * os_
+    ovy_w = float(observer.vx) * os_ + float(observer.vy) * of
+
+    # Candidate neighbors within range R, sorted nearest-first (ties by input order = stable).
+    cand: list[tuple[float, int]] = []
+    for j, o in enumerate(others):
+        dxw = float(o.x) - ox
+        dyw = float(o.y) - oy
+        dist = math.hypot(dxw, dyw)
+        if dist <= params.neighbor_range_m:
+            cand.append((dist, j))
+    cand.sort(key=lambda c: (c[0], c[1]))
+
+    for slot, (_dist, j) in enumerate(cand[:k]):
+        o = others[j]
+        dxw = float(o.x) - ox
+        dyw = float(o.y) - oy
+        nyaw = float(o.yaw)
+        nf, ns = math.cos(nyaw), math.sin(nyaw)
+        nvx_w = float(o.vx) * nf - float(o.vy) * ns
+        nvy_w = float(o.vx) * ns + float(o.vy) * nf
+        dvxw = nvx_w - ovx_w
+        dvyw = nvy_w - ovy_w
+        # Rotate the world-frame deltas into the observer body frame (forward, left).
+        dx_b = dxw * of + dyw * os_
+        dy_b = -dxw * os_ + dyw * of
+        dvx_b = dvxw * of + dvyw * os_
+        dvy_b = -dvxw * os_ + dvyw * of
+        base = slot * NEIGHBOR_FEATS
+        block[base + 0] = np.clip(dx_b / rng, -_NB_POS_HI, _NB_POS_HI)
+        block[base + 1] = np.clip(dy_b / rng, -_NB_POS_HI, _NB_POS_HI)
+        block[base + 2] = np.clip(dvx_b / vref, -_NB_VEL_HI, _NB_VEL_HI)
+        block[base + 3] = np.clip(dvy_b / vref, -_NB_VEL_HI, _NB_VEL_HI)
+        block[base + 4] = 1.0
+    return block
+
+
 def build_observation(
     track: Track,
     state: Any,
     params: ObsParams,
     edge_cache: EdgeCache | None = None,
     grip_indicator: float | None = None,
+    neighbor_block: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Assemble the 22-dim ObservationV2 from a car ``state`` (clipped to the Box).
+    """Assemble ObservationV3 from a car ``state`` (clipped to the Box).
 
     ``state`` is a :class:`~f1rl.physics.base.CarState` (uses ``x``, ``y``, ``yaw``, ``vx``,
     ``tire_wear``, ``compound``). ``grip_indicator`` is the normalized grip at the car
     (``Conditions.grip_indicator``, already ``/ mu_base``); it defaults to ``1.0`` (full grip)
-    for callers without a conditions provider. The v1 slice (0-14) is byte-identical to v1.
+    for callers without a conditions provider. The ``[0:22]`` slice is byte-identical to v2.
+
+    ``neighbor_block`` is the precomputed ObservationV3 tail (``build_neighbor_block``); the
+    builder stays **field-agnostic** — when ``None`` the tail is all-zero (a lone car), so the
+    single-agent ``RacingEnv`` simply always observes zero valid neighbors at the same length.
     """
     if edge_cache is None:
         edge_cache = build_edge_cache(track)
@@ -282,15 +391,13 @@ def build_observation(
     curv = sample_curvature_ahead(track, s_along, params.lookahead_m)
     curv = np.asarray(curv, dtype=np.float64) * params.curvature_scale
 
-    beams_raw = cast_beams(
-        track, x, y, yaw, params.beam_angles_rad, params.beam_max, edge_cache
-    )
+    beams_raw = cast_beams(track, x, y, yaw, params.beam_angles_rad, params.beam_max, edge_cache)
     if params.beam_max > 0.0:
         beams_norm = np.clip(beams_raw / params.beam_max, 0.0, 1.0)
     else:
         beams_norm = beams_raw
 
-    obs = np.empty(OBS_DIM, dtype=np.float32)
+    obs = np.zeros(params.obs_dim, dtype=np.float32)
     obs[0] = speed_norm
     obs[1] = heading_norm
     obs[2] = lateral_norm
@@ -305,7 +412,7 @@ def build_observation(
         obs[16 + compound] = 1.0
     obs[21] = 1.0 if grip_indicator is None else float(grip_indicator)
 
-    # Clip to the declared Box so the env_checker never sees an out-of-space value.
+    # Clip the prefix to the declared Box so the env_checker never sees an out-of-space value.
     np.clip(obs[0:1], -_SPEED_HI, _SPEED_HI, out=obs[0:1])
     np.clip(obs[1:2], -_HEADING_HI, _HEADING_HI, out=obs[1:2])
     np.clip(obs[2:3], -_LATERAL_HI, _LATERAL_HI, out=obs[2:3])
@@ -313,6 +420,12 @@ def build_observation(
     np.clip(obs[8:15], _BEAM_LO, _BEAM_HI, out=obs[8:15])
     np.clip(obs[15:16], _WEAR_LO, _WEAR_HI, out=obs[15:16])
     np.clip(obs[21:22], _GRIP_IND_LO, _GRIP_IND_HI, out=obs[21:22])
+
+    # Phase 6 neighbor block (already clipped at build time); zeros when None (a lone car).
+    if neighbor_block is not None and params.k_neighbors > 0:
+        tail = np.asarray(neighbor_block, dtype=np.float32).reshape(-1)
+        n = min(tail.shape[0], obs.shape[0] - BASE_OBS_DIM)
+        obs[BASE_OBS_DIM : BASE_OBS_DIM + n] = tail[:n]
     return obs
 
 

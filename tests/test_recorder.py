@@ -107,3 +107,38 @@ def test_validation_rejects_car_missing_keys_in_multi_car_frame():
         validate_trajectory(
             {"meta": {"track_id": "x", "dt": 0.05}, "frames": [{"t": 0.0, "cars": [{"x": 1.0}]}]}
         )
+
+
+# ----- Phase 6: racing fields ride along under per-car telemetry -------------------------
+
+
+def test_racing_fields_round_trip_under_telemetry(tmp_path):
+    # race_position / gap_ahead_s / contact live under each car's freeform telemetry, so the
+    # format is unchanged and they replay verbatim (backward compatible superset).
+    rec = TrajectoryRecorder(track_id="monza", dt=0.05, seed=1, n_agents=2)
+    for f in range(3):
+        cars = [
+            {
+                "id": f"car_{i}",
+                "team": i,
+                "x": float(f + i),
+                "y": 0.0,
+                "yaw": 0.0,
+                "speed": 50.0,
+                "telemetry": {
+                    "speed_kmh": 180,
+                    "race_position": i + 1,
+                    "gap_ahead_s": None if i == 0 else round(0.3 * i, 3),
+                    "contact": 0.0,
+                },
+            }
+            for i in range(2)
+        ]
+        rec.append_cars(f * 0.05, cars)
+    loaded = load_trajectory(rec.save(tmp_path / "race.json"))
+
+    leader = loaded["frames"][1]["cars"][0]["telemetry"]
+    chaser = loaded["frames"][1]["cars"][1]["telemetry"]
+    assert leader["race_position"] == 1 and leader["gap_ahead_s"] is None
+    assert chaser["race_position"] == 2 and chaser["gap_ahead_s"] == pytest.approx(0.3)
+    assert loaded["frames"] == rec.frames  # exact round-trip

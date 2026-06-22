@@ -108,22 +108,43 @@ export class Hud {
     }
   }
 
-  /** Build timing-tower rows from a field frame, ordered by track-position gap. */
+  /** Build timing-tower rows from a field frame: running order P1..PN with gap to the car ahead.
+   *
+   * Phase 6 frames carry a per-car `race_position` and `gap_ahead_s`; we order by race position
+   * and show the real gap to the car directly ahead (falling back to the Phase 5 track-position
+   * gap-to-leader for older frames that lack the racing fields). */
   private fieldRows(cars: CarEntry[]): TowerRowData[] {
-    const sorted = [...cars].sort((a, b) => (a.gap_m ?? 0) - (b.gap_m ?? 0));
-    return sorted.map((c, i) => ({
-      pos: i + 1,
-      num: `#${String(i + 1).padStart(2, "0")}`,
-      code: c.id.replace("car_", "C").toUpperCase(),
-      teamColor: TEAM_COLORS[c.team % TEAM_COLORS.length],
-      tyreColor: compoundColor(c.telemetry.compound),
-      gap: i === 0 ? "LEADER" : `+${(c.gap_m ?? 0).toFixed(0)}m`,
-      gapColor: i === 0 ? "var(--text)" : "var(--text-2)",
-      posColor: "var(--text)",
-      codeColor: "var(--text-bright)",
-      isFastest: false,
-      selected: i === 0,
-    }));
+    const hasRank = cars.some((c) => c.telemetry.race_position != null);
+    const sorted = hasRank
+      ? [...cars].sort(
+          (a, b) =>
+            (a.telemetry.race_position ?? 99) - (b.telemetry.race_position ?? 99) ||
+            (a.gap_m ?? 0) - (b.gap_m ?? 0),
+        )
+      : [...cars].sort((a, b) => (a.gap_m ?? 0) - (b.gap_m ?? 0));
+    return sorted.map((c, i) => {
+      let gap: string;
+      if (i === 0) {
+        gap = "LEADER";
+      } else if (hasRank && c.telemetry.gap_ahead_s != null) {
+        gap = `+${c.telemetry.gap_ahead_s.toFixed(1)}s`;
+      } else {
+        gap = `+${(c.gap_m ?? 0).toFixed(0)}m`;
+      }
+      return {
+        pos: i + 1,
+        num: `#${String(i + 1).padStart(2, "0")}`,
+        code: c.id.replace("car_", "C").toUpperCase(),
+        teamColor: TEAM_COLORS[c.team % TEAM_COLORS.length],
+        tyreColor: compoundColor(c.telemetry.compound),
+        gap,
+        gapColor: i === 0 ? "var(--text)" : "var(--text-2)",
+        posColor: "var(--text)",
+        codeColor: "var(--text-bright)",
+        isFastest: false,
+        selected: i === 0,
+      };
+    });
   }
 
   /** Reset the readouts to placeholders (e.g. before any frame arrives). */
