@@ -28,7 +28,7 @@ from f1rl.sim.recorder import TrajectoryRecorder
 
 @dataclass
 class FieldCarMetrics:
-    """Per-car metrics over one field episode."""
+    """Per-car metrics over one field episode (Phase 6 adds the racing stats)."""
 
     episode_return: float = 0.0
     length: int = 0
@@ -36,6 +36,11 @@ class FieldCarMetrics:
     best_lap_time: float | None = None
     off_track_count: int = 0
     termination: str | None = None
+    # Phase 6 racing metrics.
+    overtakes: int = 0  # total places gained this episode (genuine wheel-to-wheel swaps)
+    contact_steps: int = 0  # steps with any contact
+    contact_impulse_sum: float = 0.0  # summed contact impulse magnitude
+    final_position: int = 0  # last seen race position (1 = leader)
 
 
 @dataclass
@@ -61,6 +66,10 @@ class FieldResult:
         pole = self.pole_time_s
         pole_missing = pole <= 0.0
         gap = float(np.min(best) - pole) if (best and not pole_missing) else float("nan")
+        total_steps = float(sum(m.length for m in ms))
+        contact_steps = float(sum(m.contact_steps for m in ms))
+        impulse_sum = float(sum(m.contact_impulse_sum for m in ms))
+        overtakes_total = float(sum(m.overtakes for m in ms))
         return {
             "selfplay_eval/n_agents": float(len(ms)),
             "selfplay_eval/mean_return": self.mean_return,
@@ -73,6 +82,13 @@ class FieldResult:
             "selfplay_eval/pole_time_s": float(pole),
             "selfplay_eval/best_gap_to_pole": gap,
             "selfplay_eval/pole_missing": float(pole_missing),
+            # Phase 6 racing metrics: watch overtakes + contact rate TOGETHER (ramming vs timidity).
+            "selfplay_eval/overtakes_total": overtakes_total,
+            "selfplay_eval/overtakes_per_car": overtakes_total / len(ms),
+            "selfplay_eval/contact_rate": (contact_steps / total_steps) if total_steps else 0.0,
+            "selfplay_eval/mean_contact_impulse": (impulse_sum / contact_steps)
+            if contact_steps
+            else 0.0,
         }
 
 
@@ -142,6 +158,10 @@ def run_field_episode(
                         "lap_time": round(float(tinfo.get("lap_time", 0.0)), 3),
                         "progress": round(float(tinfo.get("progress", 0.0)), 4),
                         "completed_laps": int(tinfo.get("completed_laps", 0)),
+                        # Phase 6 racing readouts (carried into the replayable trajectory).
+                        "race_position": int(tinfo.get("race_position", 0)),
+                        "gap_ahead_s": tinfo.get("gap_ahead_s"),
+                        "contact": round(float(tinfo.get("contact", 0.0)), 3),
                     },
                 }
             )
@@ -168,6 +188,13 @@ def run_field_episode(
             if info.get("best_lap") is not None:
                 m.best_lap_time = float(info["best_lap"])
             m.termination = info.get("termination")
+            # Phase 6 racing metrics.
+            m.overtakes += int(info.get("overtakes", 0))
+            contact = float(info.get("contact", 0.0))
+            if contact > 0.0:
+                m.contact_steps += 1
+                m.contact_impulse_sum += contact
+            m.final_position = int(info.get("race_position", m.final_position))
         record_frame(t)
 
     result.recorder = recorder

@@ -16,6 +16,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from f1rl.env.collisions import CollisionParams, resolve_collisions
 from f1rl.env.conditions import Conditions
 from f1rl.env.observations import track_query
 from f1rl.physics.base import CarState, PhysicsModel
@@ -127,8 +128,13 @@ class SimLoop:
             self.track, idx, signed_lateral, self.state.tire_wear, self.state.compound
         )
 
-    def step(self, steer: float, longitudinal: float) -> dict[str, Any]:
-        """Advance one control step and return the state frame."""
+    def advance(self, steer: float, longitudinal: float) -> None:
+        """Advance the physics one control step (no timing / frame).
+
+        Split from :meth:`step` so :class:`FieldSimLoop` can run the field collision pass between
+        every car's physics and its frame (the same advance -> collide -> finalize ordering the
+        training env uses). ``yaw``/``vx``/``vy`` are mutated; the timer is untouched.
+        """
         grip = self._step_grip()
         self._grip = grip
         for _ in range(self.cfg.substeps):
@@ -136,8 +142,16 @@ class SimLoop:
                 self.state, steer, longitudinal, grip, self.cfg.dt_physics
             )
         self.t += self.cfg.dt_control
+
+    def finalize(self) -> dict[str, Any]:
+        """Update the lap timer at the current state and return the state frame."""
         timing = self.timer.update(self.state.x, self.state.y, self.t)
         return self._frame(timing)
+
+    def step(self, steer: float, longitudinal: float) -> dict[str, Any]:
+        """Advance one control step and return the state frame (= advance + finalize)."""
+        self.advance(steer, longitudinal)
+        return self.finalize()
 
     def _pose(self) -> dict[str, float]:
         s = self.state
@@ -212,6 +226,7 @@ class FieldSimLoop:
         grid_spacing_m: float = 12.0,
         grid_lateral_m: float = 3.0,
         team_colors: tuple[str, ...] = _DEFAULT_TEAM_COLORS,
+        collision: CollisionParams | None = None,
     ) -> None:
         self.track = track
         self.cfg = sim_cfg
@@ -221,6 +236,9 @@ class FieldSimLoop:
         self.grid_spacing_m = float(grid_spacing_m)
         self.grid_lateral_m = float(grid_lateral_m)
         self.team_colors = team_colors or _DEFAULT_TEAM_COLORS
+        # Phase 6: the field collision pass for the live view (None / disabled => the Phase 5
+        # blind parade). Cars visibly bounce because the pass mutates their state pre-frame.
+        self.collision = collision
         self.cars = [
             SimLoop(
                 physics,
@@ -269,13 +287,25 @@ class FieldSimLoop:
         return slots
 
     def step(self, pilot: Any) -> dict[str, Any]:
-        """Advance every car one control step with the shared ``pilot``; return a field frame."""
+        """Advance every car one control step with the shared ``pilot``; return a field frame.
+
+        Phase 6 ordering: advance every car's physics, run **one** field collision pass (when
+        enabled), then build each car's frame — so contact is visible (cars bounce, lose speed).
+        """
+        # 1. Advance physics (pilot reads the pre-step state of each car).
+        for car in self.cars:
+            steer, longitudinal = pilot.control(car.state)
+            car.advance(steer, longitudinal)
+        # 2. Field collision pass over the post-physics states (when enabled).
+        if self.collision is not None and self.collision.enabled and len(self.cars) > 1:
+            resolve_collisions([car.state for car in self.cars], self.collision)
+
+        # 3. Finalize each car (timing + frame) from the post-collision state.
         entries: list[dict[str, Any]] = []
         progresses: list[float] = []
         length = float(self.track.length)
         for i, car in enumerate(self.cars):
-            steer, longitudinal = pilot.control(car.state)
-            frame = car.step(steer, longitudinal)
+            frame = car.finalize()
             telem = frame["telemetry"]
             total_progress = (car.timer.completed_laps + float(telem["progress"])) * length
             progresses.append(total_progress)
@@ -291,8 +321,20 @@ class FieldSimLoop:
         self.t = self.cars[0].t if self.cars else self.t
 
         leader = max(progresses) if progresses else 0.0
-        for e in entries:
+        # Phase 6: running order P1..PN by total progress + a real gap to the car directly ahead
+        # (distance / this car's speed). The leader's gap-ahead is None.
+        order = sorted(range(len(entries)), key=lambda k: (-progresses[k], k))
+        for pos, idx in enumerate(order):
+            e = entries[idx]
             e["gap_m"] = round(leader - e.pop("_total_progress"), 2)
+            e["telemetry"]["race_position"] = pos + 1
+            if pos == 0:
+                e["telemetry"]["gap_ahead_s"] = None
+            else:
+                ahead = order[pos - 1]
+                dist = progresses[ahead] - progresses[idx]
+                speed = max(float(e.get("speed", 0.0)), 1.0)
+                e["telemetry"]["gap_ahead_s"] = round(dist / speed, 3)
 
         # The leader's telemetry mirrors the single-car keys so the legacy HUD still reads it.
         leader_i = max(range(len(entries)), key=lambda k: progresses[k]) if entries else 0

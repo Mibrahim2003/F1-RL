@@ -85,6 +85,10 @@ export interface Telemetry {
   tire_wear?: number; // 0..1
   grip?: number; // effective grip scalar at the car
   weather?: "dry" | "damp" | "wet";
+  // Phase 6 racing readouts (field frames): running order + the gap to the car ahead.
+  race_position?: number; // 1 = leader
+  gap_ahead_s?: number | null; // seconds to the car directly ahead (null for the leader)
+  contact?: number; // contact impulse this step (0 = clean)
 }
 
 /** One car in a multi-car (field) frame; a single car is a one-element `cars` array. */

@@ -52,12 +52,12 @@ def test_reward_signal_non_degenerate_on_dynamic(dyn_cfg):
     assert rewards.std() > 0.0
 
 
-def test_observation_is_v2_length_through_vecenv(dyn_cfg):
+def test_observation_is_v3_length_through_vecenv(dyn_cfg):
     from f1rl.env.observations import OBS_DIM
 
     venv = make_vec_env(dyn_cfg, n_envs=1, seed=2)
     obs = venv.reset()
-    assert np.asarray(obs).shape[-1] == OBS_DIM == 22
+    assert np.asarray(obs).shape[-1] == OBS_DIM == 42
 
 
 def test_checkpoint_resume_continues_on_dynamic(dyn_cfg, tmp_path):

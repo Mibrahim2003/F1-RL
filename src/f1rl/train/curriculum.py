@@ -29,6 +29,9 @@ class CurriculumStage:
     # Phase 4: the active circuit set from this step on. ``None`` => leave the pool unchanged;
     # an empty list => the full configured pool (widen). Tuple for the frozen dataclass.
     circuits: tuple[str, ...] | None = None
+    # Phase 6: ramp the racing reward weights in place (coexist -> race). ``None`` => unchanged.
+    w_contact: float | None = None
+    w_overtake: float | None = None
 
 
 def parse_stages(cfg: Any) -> list[CurriculumStage]:
@@ -49,6 +52,9 @@ def parse_stages(cfg: Any) -> list[CurriculumStage]:
         # Phase 4: a `circuits` key (even an empty list) means "set the pool"; absent => None.
         circuits = sget("circuits", None)
         circuits = None if circuits is None else tuple(str(c) for c in circuits)
+        # Phase 6: optional racing reward-weight ramps.
+        w_contact = sget("w_contact", None)
+        w_overtake = sget("w_overtake", None)
         stages.append(
             CurriculumStage(
                 start_step=int(sget("start_step", 0)),
@@ -56,6 +62,8 @@ def parse_stages(cfg: Any) -> list[CurriculumStage]:
                 wear_rate=None if wear is None else float(wear),
                 weather=None if weather is None else str(weather),
                 circuits=circuits,
+                w_contact=None if w_contact is None else float(w_contact),
+                w_overtake=None if w_overtake is None else float(w_overtake),
             )
         )
     stages.sort(key=lambda st: st.start_step)

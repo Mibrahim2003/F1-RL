@@ -46,6 +46,22 @@ selfplay:
   n_copies: 2              # SuperSuit parallel copies of the N-car field; vec width = n_agents*n_copies
   num_cpus: 0              # SuperSuit worker processes (0 => in-process, deterministic)
 
+# --- Phase 6: collisions (field-level pass; PhysicsModel.step stays pure) ---------------
+# Two discs per car (front + rear, swept along the body axis); contact when any disc-pair gap
+# < 2*radius. The pass snapshots post-physics states, computes every pair's correction against
+# the snapshot, then applies the sum (order-independent, reproducible from the seed). Default
+# `enabled: false` => the Phase 5 blind parade is preserved (no coupling). All SI units.
+collision:
+  enabled: false           # false => no collision pass (Phase 5 behavior); true => Phase 6 racing
+  body: two_disc           # two_disc (default) | disc  (obb = future fidelity upgrade)
+  disc_radius_m: 1.0       # per-disc radius (m)
+  disc_offset_m: 1.25      # front/rear disc offset along the body axis from car center (m)
+  restitution: 0.1         # 0 = fully inelastic, 1 = elastic; F1 contact ~ low
+  friction: 0.3            # tangential damping fraction at contact, [0, 1]
+  push_fraction: 1.0       # fraction of penetration removed per step (split evenly), [0, 1]
+  crashout_enabled: false  # opt-in severe-crash termination (ends the car with failure_reward)
+  crashout_closing_speed_mps: 25.0  # closing speed above which a contact ends the car (when on)
+
 sim:
   control_hz: 20          # control step rate (dt_control = 1/20 = 0.05 s)
   substeps: 5             # physics substeps per control step
@@ -89,6 +105,12 @@ obs:
   beam_angles_deg: [-90, -60, -30, 0, 30, 60, 90]  # 7 rangefinder beams, relative to yaw
   beam_max: 60.0                  # m, beam range; distances normalize by this, clip [0,1]
   curvature_scale: 50.0           # multiplies signed curvature (1/m) into a bounded range
+  # --- Phase 6: nearby-car block (ObservationV3 tail; OBS_VERSION = 3) ---
+  # K nearest cars, nearest-first, zero-padded, local/relative in the observer body frame.
+  # OBS_DIM = 22 + k_neighbors*5. K=0 keeps a length-22 vector (no tail). All SI units.
+  k_neighbors: 4                  # K nearest other cars encoded in the tail (per-neighbor F=5)
+  neighbor_range_m: 50.0          # sensing range R (m); a car beyond R is not a neighbor
+  neighbor_vref: 92.0             # m/s; normalizes relative velocity (dv / vref), clip [-2,2]
 
 # RewardV1 — progress-based, never rewards centerline proximity. Most-iterated weights.
 reward:
@@ -101,6 +123,15 @@ reward:
   offtrack_exp: 2.0               # >1: cheap small excursions, costly deep ones
   w_slip: 0.0                     # v2 only: penalty on excessive slip/spin; 0 keeps behavior ~v1
   slip_threshold: 0.20            # v2 only: |vy/vx| above this is penalized (rad-ish)
+  # --- Phase 6: racing terms (reward_v3 = reward_v2 core + contact + zero-sum position) ---
+  # All default 0 => reward_v3 reduces to reward_v2 (single-agent / blind field unchanged).
+  w_contact: 0.0                  # contact penalty weight: -w_contact * (closing/soft)^exp
+  contact_soft_mps: 5.0           # closing-speed scale; a light brush << a hard hit
+  contact_exp: 2.0                # >1 makes light contact cheap, heavy contact costly
+  w_contact_fault: 0.0            # optional extra share for the car at fault (reserved; default 0)
+  w_overtake: 0.0                 # + per place gained / - per place lost (genuine swaps only)
+  overtake_battle_range_m: 20.0   # both cars within this total-progress gap to count a swap
+  w_gap: 0.0                      # opt-in dense gap-closing shaping (like w_slip; default 0)
 
 # Env limits / termination + VecNormalize knobs.
 env:

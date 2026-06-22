@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from f1rl.env.rewards import RewardWeights, reward_v1
+from f1rl.env.collisions import ContactRecord
+from f1rl.env.rewards import RewardWeights, reward_v1, reward_v2, reward_v3
 
 _TRACKS_DIR = Path(__file__).resolve().parents[1] / "data" / "tracks"
 pytestmark = pytest.mark.skipif(
@@ -129,3 +130,76 @@ def test_centerline_proximity_is_never_rewarded(cfg):
             assert "lateral" not in k
             assert "centerline" not in k
             assert "center" not in k
+
+
+# ----- Phase 6: reward_v3 = reward_v2 core + graded contact + zero-sum overtake ----------
+
+import dataclasses  # noqa: E402
+
+
+def _v3w(cfg, **over):
+    return dataclasses.replace(RewardWeights.from_config(cfg), **over)
+
+
+def test_reward_v3_reduces_to_reward_v2_with_no_contact_no_places(cfg):
+    # The load-bearing reduction: no contact, constant rank, no gap shaping => byte-identical to
+    # reward_v2 (so the single-agent path and a one-car field are unchanged).
+    w = _v3w(cfg, w_contact=2.0, w_overtake=1.0)  # weights set but no event fires
+    r2, t2 = reward_v2(100.0, 104.0, 0.0, LENGTH, w, slip=0.1)
+    r3, t3 = reward_v3(
+        100.0, 104.0, 0.0, LENGTH, w, slip=0.1, contact=ContactRecord(), places=0, gap_delta=0.0
+    )
+    assert r3 == pytest.approx(r2, abs=1e-12)
+    assert t3["contact"] == 0.0 and t3["overtake"] == 0.0 and t3["gap"] == 0.0
+
+
+def test_reward_v3_none_contact_equals_empty_contact(cfg):
+    w = _v3w(cfg, w_contact=2.0)
+    a, _ = reward_v3(100.0, 104.0, 0.0, LENGTH, w, contact=None)
+    b, _ = reward_v3(100.0, 104.0, 0.0, LENGTH, w, contact=ContactRecord())
+    assert a == pytest.approx(b)
+
+
+def test_contact_subtracts_penalty_scaling_with_closing_speed(cfg):
+    w = _v3w(cfg, w_contact=2.0, contact_soft_mps=5.0, contact_exp=2.0)
+    clean, _ = reward_v3(100.0, 104.0, 0.0, LENGTH, w, contact=ContactRecord())
+    light, _ = reward_v3(
+        100.0, 104.0, 0.0, LENGTH, w, contact=ContactRecord(impulse=1.0, closing_mps=4.0, count=1)
+    )
+    hard, _ = reward_v3(
+        100.0, 104.0, 0.0, LENGTH, w, contact=ContactRecord(impulse=8.0, closing_mps=20.0, count=1)
+    )
+    assert light < clean  # any contact costs
+    assert hard < light  # a harder hit costs more (graded by closing speed)
+
+
+def test_overtake_term_is_signed_and_zero_sum(cfg):
+    w = _v3w(cfg, w_overtake=0.5)
+    base, _ = reward_v3(100.0, 104.0, 0.0, LENGTH, w, places=0)
+    gained, tg = reward_v3(100.0, 104.0, 0.0, LENGTH, w, places=1)
+    lost, tl = reward_v3(100.0, 104.0, 0.0, LENGTH, w, places=-1)
+    # +w_overtake per place gained, -w_overtake per place lost.
+    assert gained - base == pytest.approx(0.5, abs=1e-9)
+    assert lost - base == pytest.approx(-0.5, abs=1e-9)
+    # Zero-sum across the swapping pair: +1 for the car ahead, -1 for the other.
+    assert tg["overtake"] + tl["overtake"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_gap_term_is_opt_in_zero_by_default(cfg):
+    w = _v3w(cfg)  # w_gap defaults to 0
+    with_gap, t = reward_v3(100.0, 104.0, 0.0, LENGTH, w, gap_delta=12.3)
+    without, _ = reward_v3(100.0, 104.0, 0.0, LENGTH, w, gap_delta=0.0)
+    assert with_gap == pytest.approx(without)
+    assert t["gap"] == 0.0
+
+
+def test_reward_v3_has_no_lateral_or_blame_term(cfg):
+    # Still never centerline-seeking; never hand-codes blame (w_contact_fault is reserved, not a
+    # per-car fault signal). The signature carries no lateral/offset input.
+    import inspect
+
+    names = " ".join(inspect.signature(reward_v3).parameters).lower()
+    assert "lateral" not in names and "offset" not in names and "center" not in names
+    _, terms = reward_v3(100.0, 104.0, 0.0, LENGTH, _v3w(cfg), contact=ContactRecord(), places=1)
+    for key in terms:
+        assert "lateral" not in key.lower() and "center" not in key.lower()

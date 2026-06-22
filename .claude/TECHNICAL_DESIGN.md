@@ -140,6 +140,8 @@ class PhysicsModel(Protocol):
 
 The env computes `grip` from the grip pipeline and passes a single scalar in. The physics step is a pure function of state, controls, grip, and dt. No globals, no rendering, no track lookups inside the step.
 
+**Phase 6 keeps the physics step pure.** Cars are coupled only by a **field-level collision pass** (`env/collisions.py` `resolve_collisions`) the multi-agent env runs **between** advancing every car's physics and finalizing any car — `PhysicsModel.step` is never imported or touched. The car body is **two discs** (front + rear, centers at `±disc_offset_m` along the body axis, radius `disc_radius_m`); contact is any disc-pair gap `< 2r`. The response is **snapshot-then-apply** (read all post-physics states into a frozen snapshot, compute every live pair's correction against it, then apply the summed corrections) so it is **order-independent and reproducible from the seed**, never depending on agent iteration order. Equal mass (homogeneous field): positional push-apart (`push_fraction`, split evenly) along the contact normal + a normal impulse `(1+restitution)·v_n/2` + tangential `friction` damping; velocities resolve in the world frame and map back to each car's body `(vx, vy)`; `yaw`/`yaw_rate` are left unchanged (contact-induced spin is a future fidelity upgrade). Every geometry/response constant is in the `collision:` config block (`enabled` default false → the Phase 5 blind parade is preserved). Done/removed cars are excluded (not passed to the pass).
+
 Physics parameters live in config with realistic F1-scale defaults, all tunable: wheelbase about 3.6 m, mass about 770 to 800 kg, max steer about 18 degrees at the wheels, plus engine force, brake force, drag, rolling resistance, and an optional downforce coefficient. None of these are load-bearing constants. Tune them in config.
 
 Calibration note: the grip level (`mu_base`), `downforce_coeff`, `max_engine_force`, and
@@ -220,17 +222,17 @@ Version 1, single car, fixed length about 15:
 - Track curvature sampled at 5 lookahead distances ahead along the centerline, for example 10, 25, 50, 100, and 150 m. This is how the car sees the upcoming corners.
 - 7 rangefinder beams cast from the car to the asphalt edge at fixed angles, for example minus 90 to plus 90 degrees, each giving normalized distance to the edge.
 
-**ObservationV2 (Phase 3b Dynamic Model)**: Fixed length of 22 (OBS_VERSION = 2). This is the
-**only** layout the code produces now; V1 (length 15) is historical — it is described above for
-the record, but `observations.py` hard-codes `OBS_DIM = 22` and there is no V1 builder left.
-Index ranges below use Python slice notation (half-open), matching `observations.py`:
-- `[0:15]` The exact 15-length slice from V1 (speed, heading error, lateral offset, 5 curvature lookaheads, 7 rangefinders).
-- `[15]` Tire wear (0.0 to 1.0).
-- `[16:21]` Tire compound — **5-wide** one-hot (indices 16–20: Soft, Medium, Hard, Intermediate, Wet).
-- `[21]` Grip/Weather indicator (e.g., 1.0 for dry, lower for wet).
-- The relative position and velocity of the K nearest cars (added in later phases).
+**ObservationV3 (Phase 6, racing)**: Fixed length `22 + K*5` (default 42 with `K = 4`), `OBS_VERSION = 3`. This is the **only** layout the code produces now; V1 (length 15) and V2 (length 22) are historical — `observations.py` builds V3, and V3 is V2 with a **purely additive neighbor block appended at the tail**. Index ranges use Python slice notation (half-open), matching `observations.py`:
+- `[0:22]` The **byte-identical ObservationV2 prefix** (a test asserts this — it is the warm-start property):
+  - `[0:15]` the exact V1 slice (speed, heading error, lateral offset, 5 curvature lookaheads, 7 rangefinders).
+  - `[15]` Tire wear (0.0 to 1.0).
+  - `[16:21]` Tire compound — **5-wide** one-hot (indices 16–20: Soft, Medium, Hard, Intermediate, Wet).
+  - `[21]` Grip/Weather indicator (e.g., 1.0 for dry, lower for wet).
+- `[22 : 22+K*5]` The **neighbor block** — the `K` nearest cars, **nearest-first, zero-padded**, encoded **local/relative in the observer's body frame** (`build_neighbor_block`). Per neighbor (`F = 5`): `[dx_body/R, dy_body/R, dvx_body/vref, dvy_body/vref, valid]` — relative position (forward/left, normalized by the sensing range `R`, clipped `[-1,1]`), relative velocity (forward/left, normalized by `vref`, clipped `[-2,2]`), and a validity bit. Only cars within range `R` are kept; unused slots are all-zero. `K`, `R`, `vref` come from the `obs:` config block (`k_neighbors`/`neighbor_range_m`/`neighbor_vref`); `k_neighbors = 0` reproduces the V2 width exactly.
 
-The observation version is fixed per phase. When the vector layout changes, the schema enforces retraining by refusing a checkpoint resume on a mismatched version (`validate_checkpoint`). Because only V2 exists in code, any pre-V2 checkpoint is intentionally unloadable.
+**No absolute position ever enters the block** — it is invariant to translating/rotating the whole field up to the observer's own frame (a test enforces this), so one policy still generalizes across the calendar. A lone car (or a one-car field) observes an **all-zero** neighbor block, so the single-agent path is the V2 prefix followed by zeros. The obs builder stays **field-agnostic**: it receives a precomputed `neighbor_block`, never the field — the multi-agent env computes each car's block from the post-collision states and passes it in.
+
+The observation version is fixed per phase. When the vector layout changes (V2 → V3 here), the schema enforces retraining by refusing a checkpoint resume on a mismatched version (`validate_checkpoint`). A Phase 5 (V2) checkpoint therefore **cannot** be silently `--resume`d into Phase 6; the explicit, deliberate transplant is the grown warm start (§12). Any pre-V3 checkpoint is intentionally unloadable except through that path.
 
 ---
 
@@ -269,9 +271,23 @@ Graded off-track penalty, which gives the behavior the vision asks for:
 - Slightly past the edge, within the runoff band: a small penalty that grows with distance off. Grass and gravel also cut grip and add drag, so a small excursion already loses time on its own.
 - Far past the runoff, or stopped off track, or wrong way for too long: large penalty and episode termination.
 
-Termination: success on completing the target lap count, failure on a large off-track or wrong-way event, truncation on a step limit. Contact penalty enters in the multi-agent phase.
+Version 2 (Phase 3b): the V1 progress core plus an **opt-in, config-gated slip penalty** (`w_slip`, default 0 → numerically identical to V1). Still never centerline-seeking.
 
-Reward shaping is the single most iterated part of this project. Keep every weight in config and expect to tune it more than any other piece.
+**Version 3 (Phase 6, racing)**: `reward_v3` = the `reward_v2` core **− a graded contact penalty + a zero-sum position term**, every weight in the `reward:` config block (all default 0, so `reward_v3` reduces **exactly** to `reward_v2` with no contact and a constant rank — a test enforces it, which is what keeps the single-agent path and a one-car field unchanged):
+
+```
+contact  = - w_contact  * (closing_mps / contact_soft_mps) ** contact_exp   # from the car's ContactRecord
+overtake = + w_overtake * places                                            # zero-sum, genuine swaps only
+gap      = + w_gap      * gap_delta                                         # opt-in dense shaping, default 0
+reward_v3 = reward_v2 + contact + overtake + gap
+```
+
+- **Contact** is graded by the **closing speed** of the touch (a light brush costs little, a hard hit a lot; `contact_exp > 1` sharpens it) — clean racing pays, dirty racing does not. It is **symmetric** by default; `w_contact_fault` is reserved for charging an at-fault car more once fault is attributed (no per-car fault is recorded yet, default 0). It never references a lateral offset or a racing line.
+- **Overtake/defend** credits `places` = the net places gained this step, **gated by the field to genuine wheel-to-wheel swaps** (a pair's order flipped AND the two are within `overtake_battle_range_m` of each other in total progress) and **zero-sum** across the swapping pair (+1 to the car now ahead, −1 to the other). The same weight drives both overtaking and defending; the maneuver is never encoded — it emerges from chasing/avoiding this term.
+
+Termination: success on completing the target lap count, failure on a large off-track or wrong-way event, truncation on a step limit. **Phase 6 adds an opt-in contact crash-out** (`collision.crashout_enabled`, default false): a contact whose closing speed exceeds `collision.crashout_closing_speed_mps` ends that car down the same `failure_reward` path as an off-track. By default contact is **penalized, not terminal**.
+
+Reward shaping is the single most iterated part of this project (the **budgeted core of Phase 6** — too much `w_overtake` → ramming, too much `w_contact` → timid cars; watch contact rate and overtake count together, ramped via the coexist→race curriculum, §12). Keep every weight in config and expect to tune it more than any other piece.
 
 Lap-time benchmark. The simulation runs in real meters with real-scale physics, so a lap time comes out in real seconds and compares directly to the real pole lap for the circuit. Use lap time as the evaluation scoreboard, not the training signal. The dense progress reward drives learning. The aspiration is the real pole time. The first practical milestone is twice the pole time while the agent is still learning, tightened over training. How close to the pole is reachable depends on the car physics you tune, since the car has a top speed and a grip ceiling you set, so calibrate the car so a clean optimal lap lands near the pole and the comparison stays fair. Log lap time against the pole and against twice the pole for every circuit.
 
@@ -304,6 +320,14 @@ Multi agent — the field, Phase 5 (many cars, no racing rules yet):
 - **One shared policy, parameter sharing**, vectorized PettingZoo → SuperSuit (`black_death_v3` → `pettingzoo_env_to_vec_env_v1` → `concat_vec_envs_v1`) → Stable-Baselines3 PPO (`env/factory.py` `make_selfplay_vec_env`, `train/selfplay.py`). Every car's transition trains the same weights; with no mutual observation this equals raising `n_envs` for *learning* (Phase 5 buys infrastructure + the render, not a learning gain).
 - **Field size (`n_agents`) is a per-run constant, grown across warm-started runs (2 → 4 → 22)** — it sets the vector-env width (`n_agents * n_copies`), which the in-place curriculum (`VecEnv.env_method`, sampling-side, no rebuild) cannot change without breaking the PPO rollout buffer. The **circuit-pool widening stays an in-place curriculum knob** (Phase 4, unchanged). `n_agents` is **not** a `CurriculumStage` field. SuperSuit's `ConcatVecEnv` has no `env_method`, so the curriculum reaches the raw field envs via `factory.raw_parallel_envs` (in-process `num_cpus=0` only).
 
+Multi agent — racing, Phase 6 (the cars see and touch each other):
+
+- **The observation becomes ObservationV3** (`OBS_VERSION = 3`, length `22 + K*5`, §7): the V2 prefix plus a per-car K-nearest-cars neighbor block. The spaces are still homogeneous (every agent identical) and the env still passes `parallel_api_test` with collisions + the block + `reward_v3` all live.
+- **`step` is reordered into a field step** (the only place cars couple): (1) **advance** every live car's physics independently (`advance_car_physics`); (2) run **one** field-level collision pass (`resolve_collisions`, §5) over the post-physics states and write each car's `ContactRecord`; (3) **rank** the live field by total progress (`completed_laps·length + s`) and compute each car's zero-sum `places` (`rank_and_overtakes`, gated to genuine wheel-to-wheel swaps within `overtake_battle_range_m`); (4) **finalize** each car (`finalize_car_step`) with its precomputed neighbor block + `places`, attaching `race_position` and `gap_ahead_s` to the info. The per-car step is the same `advance`+`finalize` split `RacingEnv` calls (one car can't collide and holds a constant rank, so `step_one_car` = advance + finalize with no block / `places = 0`, and `reward_v3` reduces to `reward_v2`). With `collision.enabled = false` and zero racing weights this is **byte-for-byte the Phase 5 blind parade**, and a one-car field reproduces `RacingEnv` step-for-step (tests enforce both).
+- **Contact is penalized, not terminal, by default.** `collision.crashout_enabled` (default false) is the opt-in valve: a contact above `crashout_closing_speed_mps` ends that car down the existing `failure_reward` path. Crashed/done cars leave `self.agents` (Phase 5 removal, unchanged) and are excluded from the next step's collision + neighbor passes; `black_death_v3` keeps the SuperSuit width constant.
+- **Reward weights ramp in place via the curriculum** (`apply_reward_weights` on the raw field envs, the same transport as `apply_conditions`): a run learns to **coexist** (contact penalty on, overtake reward low) before it learns to **fight** (overtake reward ramped up). `CurriculumStage` gains optional `w_contact`/`w_overtake`; no obs-layout change, so it is safe mid-run. Field scaling + circuit pool are reused unchanged.
+- The collision pass and the overtake ranking are **deterministic** (snapshot-then-apply; ranks sorted by total progress, ties broken by id) and use no module RNG — the circuit draw + both reset modes still use `self.np_random`.
+
 Shared rules:
 
 - Parallel env copies run through Stable-Baselines3 vectorized envs for PPO throughput. The cloud gives few CPU cores, which limits this and motivates the JAX option in section 17. SuperSuit steps all N cars **sequentially inside one process**, so a process's step cost scales ~linearly with N on the dynamic model and is **not** amortized by `SubprocVecEnv` fan-out — measure SPS (field vs equal-width single-agent) before committing field sizes.
@@ -323,7 +347,7 @@ The interactive application is the primary surface of the project and the first 
 
 The heavy training loop draws nothing, for speed, and the web frontend is never in that hot path. Two paths keep full visibility. The evaluation callback runs offscreen on the cloud, with the SDL video driver set to dummy, renders one episode to an mp4 through Pygame and imageio, and logs the clip — this headless eval-clip path is unchanged by the web pivot. After training, the app loads a checkpoint and runs the agent live. The app stays your view into everything. Only the long training loop runs unseen.
 
-The recorded-trajectory JSON format (section 10's recorder output) is the shared interchange between the live sim, the replay viewer, and the cloud eval-clip renderer: all three consume the same frame stream, so a run recorded in any mode replays identically anywhere. Phase 5: the live frame and the recorder carry a `cars: [{id, x, y, yaw, speed, team, telemetry}, …]` array (a single car is a one-element array, so the Phase 1/4 one-car path is unchanged); the field is driven live by `FieldSimLoop` (N cars, one shared pilot) and the frontend draws every car colored by team, follows the leader, and lists the field in the timing tower by track-position gap.
+The recorded-trajectory JSON format (section 10's recorder output) is the shared interchange between the live sim, the replay viewer, and the cloud eval-clip renderer: all three consume the same frame stream, so a run recorded in any mode replays identically anywhere. Phase 5: the live frame and the recorder carry a `cars: [{id, x, y, yaw, speed, team, telemetry}, …]` array (a single car is a one-element array, so the Phase 1/4 one-car path is unchanged); the field is driven live by `FieldSimLoop` (N cars, one shared pilot) and the frontend draws every car colored by team, follows the leader, and lists the field in the timing tower by track-position gap. Phase 6: `FieldSimLoop` runs the same collision pass and attaches **`race_position`** + **`gap_ahead_s`** (gap to the car directly ahead in the running order) to each car's per-car `telemetry`; the timing tower lists the running order P1…PN with the gap-to-ahead, and contact is visible because the cars bounce. The recorder/replay format is a backward-compatible superset (the racing fields ride along under `telemetry`), so a recorded race replays with positions/gaps and the one-car view is unchanged.
 
 ---
 
@@ -331,10 +355,11 @@ The recorded-trajectory JSON format (section 10's recorder output) is the shared
 
 - `train.py` runs from a config, logs to Weights and Biases, and saves checkpoints on a schedule.
 - A checkpoint holds the model weights, the optimizer state, the observation normalization stats, the total timestep count, the config, and the RNG states. Saving and resuming must round-trip exactly.
-- `--resume <path>` continues a run after a disconnect. Assume the session can die at any moment and checkpoint frequently.
+- `--resume <path>` continues a run after a disconnect (validated: obs version + action shape must match — v3 → v3 only). Assume the session can die at any moment and checkpoint frequently.
+- **Grown warm start (Phase 6, `train/warmstart.py` `grow_policy` + `selfplay.py --warm-start`).** Because `OBS_VERSION` bumped 2 → 3, a silent `--resume` of a Phase 5 (v2) checkpoint is **refused** — correct, the obs layout changed. The deliberate transplant instead loads the v2 model with `validate=False`, builds the fresh v3 PPO (same hyperparameters), copies **every** weight except the policy/value **input layer** (`mlp_extractor.policy_net.0` / `value_net.0`), copies that layer's columns for the unchanged inputs `[0:22]` and **zero-initializes** the new neighbor columns `[22:]`, copies biases, and grows the `VecNormalize` `obs_rms` to the new width (new dims start mean 0 / var 1). The result drives **exactly like Phase 5 on a no-neighbor observation** (the zero columns contribute nothing at step one) and only has to learn to use the block on top; a source whose non-neighbor layout is not a clean prefix is refused. Training from scratch is the documented fallback. `--warm-start` is distinct from the still-validating `--resume`; a v3 checkpoint round-trips and resumes normally.
 - Checkpoints write to Google Drive on Colab or to notebook output on Kaggle.
 - An evaluation callback periodically runs one deterministic episode, records it, renders a short clip, and logs the clip and the metrics to Weights and Biases.
-- Logged metrics: episode return, lap time against the pole and twice the pole, off-track count, contact count in the racing phase, and the learning curves.
+- Logged metrics: episode return, lap time against the pole and twice the pole, off-track count, and the learning curves. **Phase 6 racing metrics** (`train/selfplay_eval.py`, eval started in `grid` reset): overtakes per race (total + per car), contact rate + mean contact impulse, the finishing order, and `race_position`. The reward balance is read off **contact rate and overtake count together** (§9).
 - **Curriculum Learning**: Staged realism is enforced through a config-driven `CurriculumCallback`. The callback steps through stages (e.g., Dry -> Damp -> Full Dynamic with Tire Wear) based on the current timestep, calling an `apply_conditions` hook on the environment without halting the training loop.
 
 ---
@@ -406,13 +431,14 @@ f1-rl/
       app.py                    # FastAPI app: WS /ws/sim, GET /track, GET /recordings, policies
       messages.py               # Pydantic client/server message models
     env/
-      single_agent.py           # RacingEnv + factored step_one_car/reset_car/CarRuntime (Phase 5)
-      observations.py           # ObservationV2 builder (length 22)
-      rewards.py                # reward_v1 / reward_v2 (progress core)
+      single_agent.py           # RacingEnv + advance/finalize split, CarRuntime (Phase 5/6)
+      observations.py           # ObservationV3 builder (22 + K*5) + build_neighbor_block (Phase 6)
+      rewards.py                # reward_v1 / reward_v2 / reward_v3 (+ contact + overtake, Phase 6)
+      collisions.py             # field-level two-disc collision pass, ContactRecord (Phase 6)
       conditions.py             # weather/surface state + grip provider
       pool.py                   # CircuitPool: per-id Track/EdgeCache/LapTimer/pole (Phase 4)
       factory.py                # make_vec_env + make_selfplay_vec_env (SuperSuit→SB3, Phase 5)
-      multi_agent.py            # RacingParallelEnv: N-car field, per-car LapTimer (Phase 5)
+      multi_agent.py            # RacingParallelEnv: field step + collisions + ranking (Phase 5/6)
     render/
       renderer.py               # offscreen frames to mp4 for eval clips (training only)
     train/
@@ -425,8 +451,9 @@ f1-rl/
       benchmark.py              # steps-per-second sweep
       calibrate.py              # tune grip/engine/brake so optimal lap ~ pole
       wandb_logger.py           # W&B with local-CSV fallback
-      selfplay.py               # shared-policy self-play PPO + throughput check (Phase 5)
-      selfplay_eval.py          # multi-car field eval driver (cars[] trajectory + metrics, Phase 5)
+      selfplay.py               # shared-policy self-play PPO + throughput + --warm-start (Phase 5/6)
+      selfplay_eval.py          # multi-car field eval driver (cars[] trajectory + racing metrics)
+      warmstart.py              # grow_policy: transplant v2 driver into v3 input layer (Phase 6)
     utils/
       seeding.py
       config.py                 # OmegaConf load
@@ -438,14 +465,16 @@ f1-rl/
                                 # recorder, config, seeding, checkpoint, curriculum, server,
                                 # smoke-train (kinematic+dynamic), lap-benchmark,
                                 # circuit-pool, env-sampling, calendar-benchmark (Phase 4),
-                                # multi-agent-env, selfplay-smoke (Phase 5)
+                                # multi-agent-env, selfplay-smoke (Phase 5),
+                                # collisions, warmstart, reward_v3 (Phase 6)
 ```
 
 The interactive app is split across the top-level `web/` frontend and two Python packages: `server/` (the FastAPI app and its message models) and `sim/` (the fixed-step loop, lap timing, the trajectory recorder, and the centerline autopilot for watch-live). The `recorder.py` lives under `sim/` because the recorded-trajectory JSON it produces is the shared interchange across live sim, replay, and eval clips. `render/renderer.py` stays under the package as the offscreen eval-clip renderer used by training only; it is never imported by the app or the training hot path.
 
-The tree reflects the repo **as built through Phase 5** (`env/multi_agent.py`,
-`env/factory.make_selfplay_vec_env`, `train/selfplay.py`, `train/selfplay_eval.py`, and the
-`grid:`/`selfplay:` config blocks are all present). Eval-clip rendering is invoked through
+The tree reflects the repo **as built through Phase 6** (`env/collisions.py`, `train/warmstart.py`,
+ObservationV3 + `reward_v3`, the `collision:` config block, and the racing field step join the
+Phase 5 `env/multi_agent.py`, `env/factory.make_selfplay_vec_env`, `train/selfplay.py`,
+`train/selfplay_eval.py`, and the `grid:`/`selfplay:` config blocks). Eval-clip rendering is invoked through
 `train/evaluate.py --video` (there is no separate `scripts/render_episode.py`); the Phase 5
 field produces a multi-car `cars[]` trajectory replayed in the web app rather than a multi-car
 mp4. There is no `notebooks/` directory yet — the Colab/Kaggle path clones the repo and runs
@@ -482,7 +511,7 @@ Phase 4, one car on many circuits. Confirm the observations are fully track-agno
 
 Phase 5, many cars on track. Add the multi-agent env on PettingZoo with shared-policy self-play, and put the full field on track with no racing rules yet. Scale from 2 cars to 4 to the full 22. Artifact: a grid lapping a circuit together in the app. As-built contracts: `RacingParallelEnv` (`env/multi_agent.py`) holds N homogeneous cars on one shared circuit, reusing the factored `step_one_car`/`reset_car` per car with a **per-car `LapTimer`** (never the pooled entry's), passing `parallel_api_test`; the **observation is unchanged** (`OBS_VERSION = 2`, no nearby-car block); the `grid:` config block sets field size + reset mode (`scattered` train / `grid` eval); SuperSuit (`black_death_v3` for constant width → `pettingzoo_env_to_vec_env_v1` → `concat_vec_envs_v1`) → SB3 PPO trains one shared policy (`make_selfplay_vec_env`, `train/selfplay.py`), warm-starting the Phase 4 generalist; **field size is a per-run constant grown across warm-started runs** (the circuit-pool widening stays an in-place curriculum, broadcast to the raw envs); the checkpoint meta adds `n_agents` (not validated across widths); the live frame carries a `cars: [...]` array (single car = one-element, backward compatible) driven by `FieldSimLoop`, with one multi-car recorder and the timing tower listing every car by track-position gap. **The bar is infrastructure + the render, not a learning gain** (none expected with no mutual observation).
 
-Phase 6, racing for real. Add the nearby-car observations, collision detection, the contact penalty, and rewards for overtaking and defending. The accidents, the blocking, and the wheel-to-wheel racing emerge here. This is the hardest phase. Budget the most time. Artifact: a full grid racing with overtaking and defending.
+Phase 6, racing for real. Add the nearby-car observations, collision detection, the contact penalty, and rewards for overtaking and defending. The accidents, the blocking, and the wheel-to-wheel racing emerge here. This is the hardest phase. Budget the most time. Artifact: a full grid racing with overtaking and defending. As-built contracts: **ObservationV3** appends a K-nearest-cars neighbor block (`OBS_VERSION = 3`, length `22 + K*5`, `[0:22]` byte-identical to v2, local/relative only, §7); a **field-level collision pass** (`env/collisions.py`, two discs/car, snapshot-then-apply, order-independent, `PhysicsModel.step` untouched, §5); **`reward_v3`** = the v2 core − a graded contact penalty + a zero-sum overtake/defend term (every weight in config, reduces to v2 with no contact / constant rank, §9); the field `step` reordered advance → collide → rank → finalize-with-block (§10); the **grown input-layer warm start** transplanting the Phase 5 driver (a v2 `--resume` is refused, §12); a **reward-weight curriculum** ramping coexist → race; racing metrics (overtakes, contact rate + mean impulse, finishing order) and the race-aware app (`race_position` + gap-to-ahead in the timing tower, contact visible). The `collision:` config block defaults `enabled: false`, so an existing config keeps the Phase 5 parade. **Unlike Phase 5, the bar is a learning/behavioral gain — the race has to look like a race.**
 
 Phase 7, pit stops and polish (optional capstone). Add a pit lane with a speed limit and a stop time cost, then a scripted pit rule that pits when tire wear crosses a threshold. Make the pit decision a learned action only as a stretch goal. Add team colors and a richer HUD, record the showcase videos, and write the README. Artifact: a portfolio-ready race with strategy.
 
