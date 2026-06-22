@@ -143,6 +143,34 @@ def test_npz_round_trip_exact(tmp_path):
     assert (tmp_path / "_build_report.json").exists()
 
 
+def test_save_track_bakes_faithful_api_payload(tmp_path):
+    # save_track writes <id>.api.json; it must equal the .npz's recomputed API dict so the web
+    # server can serve it verbatim.
+    import json
+
+    pts, peri = _ellipse()
+    track, report = build_from_points(pts, _cfg(peri), source="fastf1")
+    save_track(track, report, cache_dir=tmp_path)
+    baked = json.loads((tmp_path / "ellipse.api.json").read_text(encoding="utf-8"))
+    assert baked == Track.from_npz(tmp_path / "ellipse.npz").to_api_dict()
+
+
+def test_bake_all_writes_payloads_and_catalog(tmp_path):
+    import json
+
+    from f1rl.track.loader import bake_all
+
+    pts, peri = _ellipse()
+    track, report = build_from_points(pts, _cfg(peri), source="fastf1")
+    track.save_npz(tmp_path / "ellipse.npz")  # raw .npz only, no baked payload yet
+    baked = bake_all(tmp_path)
+    assert baked == ["ellipse"]
+    assert (tmp_path / "ellipse.api.json").is_file()
+    catalog = json.loads((tmp_path / "_catalog.json").read_text(encoding="utf-8"))
+    ids = {row["id"] for row in catalog}
+    assert {"oval", "ellipse"} <= ids
+
+
 def test_built_track_api_dict_json_serializable():
     import json
 

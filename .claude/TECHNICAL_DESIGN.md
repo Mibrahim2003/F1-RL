@@ -360,6 +360,10 @@ f1-rl/
   data/
     raw_telemetry/              # FastF1 cache, gitignored
     tracks/                     # processed Track files, .npz, + _build_report.json
+                                #   + pre-baked web payloads: <id>.api.json (GET /track body)
+                                #   and _catalog.json (GET /api/tracks body), committed so the
+                                #   server serves a file read instead of reloading/serializing
+                                #   numpy per request (scripts/bake_track_json.py regenerates)
   recordings/                   # recorded-trajectory JSON, gitignored
   web/                          # interactive app frontend (Vite + TypeScript)
     index.html                  # the broadcast-style stage shell

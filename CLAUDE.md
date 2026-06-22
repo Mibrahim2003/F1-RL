@@ -48,6 +48,29 @@ The Phase 1 interactive app has two halves. Launch the Python backend, then the 
 
 # Frontend: Vite dev server (needs Node/npm)
 cd web && npm install && npm run dev   # then open the printed localhost URL
+
+# Frontend typecheck / build gate (there are no frontend unit tests — tsc is the check)
+cd web && npx tsc --noEmit             # typecheck only
+cd web && npm run build                # tsc && vite build
+```
+
+Training, evaluation, and the offline pipelines are argparse modules run with `-m` (each takes `--config <experiment-name>` from `configs/experiment/` and trailing `key=value` dotlist overrides):
+
+```bash
+# Single-circuit PPO (Phase 3) / self-play field PPO (Phase 5); --resume warm-starts a checkpoint
+.venv/Scripts/python.exe -m f1rl.train.train --config rbr_dynamic
+.venv/Scripts/python.exe -m f1rl.train.selfplay --config calendar_selfplay --resume runs/<ckpt>
+
+# Score a checkpoint vs the real pole on every pool circuit → out/calendar_benchmark.json (GET /api/calendar)
+.venv/Scripts/python.exe -m f1rl.train.calendar_benchmark --checkpoint runs/<ckpt>
+# Evaluate one checkpoint deterministically, optional mp4 of the first episode
+.venv/Scripts/python.exe -m f1rl.train.evaluate --checkpoint runs/<ckpt> --video out/lap.mp4
+
+# Build real circuits offline (needs the trackbuild extra + network on first run; FastF1/OSM)
+.venv/Scripts/python.exe scripts/build_all_tracks.py            # all circuits
+.venv/Scripts/python.exe scripts/build_all_tracks.py monza spa  # a subset
+# Re-bake the web payloads from existing .npz (runtime-safe: no FastF1, no network)
+.venv/Scripts/python.exe scripts/bake_track_json.py
 ```
 
 ## Architecture (the big picture)
@@ -60,9 +83,20 @@ Target layout is `src/f1rl/` with a strict separation of concerns (full tree in 
 - **The env owns everything and must pass the Gymnasium env checker.** `RacingEnv(gymnasium.Env)` (single agent) and `RacingParallelEnv(pettingzoo.ParallelEnv)` (multi-agent, shared-policy self-play). A test enforces `gymnasium.utils.env_checker.check_env`.
 - **Observations are local/relative only — never absolute position.** This is what lets one policy generalize across the whole calendar.
 - **Reward forward progress and speed; never reward centerline proximity.** The racing line (late apexes, full track width) must emerge from the reward, not be hand-fed. Lap time is the evaluation scoreboard, not the training signal.
-- **Tracks are built offline and cached.** FastF1 is a **build-time-only** dependency that produces `data/tracks/<name>.npz`; it must never be imported in the training loop or called over the network during training.
+- **Tracks are built offline and cached, including the form the web app consumes.** FastF1 is a **build-time-only** dependency that produces `data/tracks/<name>.npz`; it must never be imported in the training loop or called over the network during training. The build also bakes the web backend's served payloads next to each `.npz` — per-circuit `<id>.api.json` (the verbatim `GET /track/<id>` body) and `_catalog.json` (`GET /api/tracks`) — which the server reads as bytes verbatim instead of reloading numpy and re-serializing JSON per request. `save_track`, `build_all_tracks.py`, and the surface editor keep these in sync; `scripts/bake_track_json.py` regenerates them from existing `.npz` with no network. All three (`.npz`, `.api.json`, `_catalog.json`) are committed so circuits are preloaded on app open; the routes fall back to recomputing from the `.npz` if a payload is missing.
 - **The interactive surface is a web app.** A Vite + TypeScript frontend with an HTML5 Canvas 2D viewport talks to a local FastAPI/uvicorn backend over a WebSocket that streams car state at the control rate. The backend runs the sim loop (`src/f1rl/sim/`) and serves track geometry and recorded trajectories; the frontend (`web/`) only renders and sends input. Four modes: manual drive, configure, watch live, replay.
 - **The web frontend is never in the training hot path.** Training draws nothing for speed, and the web app is never imported by it. Visibility comes from (a) an offscreen eval callback rendering one episode to mp4 (headless Pygame + imageio, unchanged by the web pivot), and (b) the interactive web app loading a checkpoint and running the agent live. The recorded-trajectory JSON format is the shared interchange across live sim, replay, and eval clips.
+
+## Web frontend (`web/`)
+
+Vanilla TypeScript + Vite, no UI framework. `web/src/main.ts` is the wiring hub: it owns the module instances and a small observable `Store` (`state.ts`), subscribes the DOM to state changes, and routes UI/keyboard/socket events. The pieces:
+
+- `net/socket.ts` (`SimSocket`) — typed `/ws/sim` client with backoff auto-reconnect. `send()` **silently drops** anything pushed before the socket is `OPEN`.
+- `viewport/renderer.ts` (`Renderer` + `camera.ts`) — Canvas 2D; world-meter `Path2D` geometry built once per track, ~60 fps with interpolation between 20 Hz state frames. Renders a single car **or** a field — a frame with `cars[].length > 1` flips `fieldMode` and uses per-car interpolation buffers. The layout is fluid (the stage fills the window; no fixed 1920×1080 + transform scale).
+- `ui/` — `TrackSelector`, `ConfigPanel` (surface editor), `PolicyPicker` (watch-mode driver **and** field-size picker), `CalendarPanel` (Phase 4 result table). `input/keyboard.ts` is manual-drive only (arrows/WASD), enabled solely in manual mode.
+- `hud/`, `replay/` — telemetry HUD and the replay scrubber/player.
+
+**The server starts every `/ws/sim` connection fresh** — default `manual` mode, single car (`_Session`/`_SimState` in `server/app.py`). The client is the source of truth for mode/field, so it resyncs the server **in the socket's `onOpen`** (`syncServer` in `main.ts`), never right after `connect()` — a message sent while the socket is still `CONNECTING` is dropped, and this race also bites after every auto-reconnect. Entering `configure` pauses the server (`sendControl("pause")`); returning to watch/manual must `sendControl("play")` or the field stays frozen while the client shows it running.
 
 ## Conventions that are easy to get wrong
 

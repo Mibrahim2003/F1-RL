@@ -616,10 +616,17 @@ def save_track(
     cache_dir: Path = DEFAULT_CACHE_DIR,
     report_path: Path | None = None,
 ) -> Path:
-    """Save the ``.npz`` and append the report row to ``data/tracks/_build_report.json``."""
+    """Save the ``.npz``, the pre-baked ``<id>.api.json`` web payload, and the report row.
+
+    The report lands in ``data/tracks/_build_report.json``; ``_catalog.json`` is refreshed once
+    after the whole run by :mod:`scripts.build_all_tracks`.
+    """
+    from f1rl.track.loader import write_track_api  # runtime-safe; imported here to avoid a cycle
+
     cache_dir.mkdir(parents=True, exist_ok=True)
     npz_path = cache_dir / f"{track.name}.npz"
     track.save_npz(npz_path)
+    write_track_api(track, cache_dir)
     rp = report_path or (cache_dir / "_build_report.json")
     rows: dict[str, Any] = {}
     if rp.exists():

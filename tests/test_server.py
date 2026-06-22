@@ -180,6 +180,50 @@ def test_get_unbuilt_track_404(tmp_path):
         assert client.get("/track/spa").status_code == 404
 
 
+def test_track_served_from_baked_payload_matches_recompute(tmp_path):
+    # save_track bakes <id>.api.json; the route serves it verbatim and the body must equal
+    # the freshly recomputed to_api_dict for the same .npz.
+    _build_synthetic("monza", tmp_path)
+    assert (tmp_path / "monza.api.json").is_file()
+    recomputed = Track.from_npz(tmp_path / "monza.npz").to_api_dict()
+    cfg = load_config("default")
+    cfg.server.tracks_dir = str(tmp_path)
+    with TestClient(create_app(cfg)) as client:
+        assert client.get("/track/monza").json() == recomputed
+
+
+def test_track_falls_back_when_baked_payload_missing(tmp_path):
+    # Deleting the baked payload must not break the route — it recomputes from the .npz.
+    _build_synthetic("monza", tmp_path)
+    (tmp_path / "monza.api.json").unlink()
+    cfg = load_config("default")
+    cfg.server.tracks_dir = str(tmp_path)
+    with TestClient(create_app(cfg)) as client:
+        data = client.get("/track/monza").json()
+        assert data["closed"] is True and data["centerline"]
+
+
+def test_api_tracks_served_from_baked_catalog(tmp_path):
+    # With a pre-baked _catalog.json the route serves it (wrapped) without scanning every .npz.
+    from f1rl.track.loader import write_catalog
+
+    _build_synthetic("monza", tmp_path)
+    write_catalog(tmp_path)
+    assert (tmp_path / "_catalog.json").is_file()
+    cfg = load_config("default")
+    cfg.server.tracks_dir = str(tmp_path)
+    with TestClient(create_app(cfg)) as client:
+        ids = {t["id"] for t in client.get("/api/tracks").json()["tracks"]}
+        assert {"oval", "monza"} <= ids
+
+
+def test_surface_save_rebakes_payload(tmp_path):
+    # A surface edit must refresh the baked payload so /track reflects it immediately.
+    with _client_with_tracks(tmp_path, "monza") as client:
+        client.post("/track/monza/surfaces", json={"kerb_width": 1.5})
+        assert np.allclose(client.get("/track/monza").json()["kerb_width"], 1.5)
+
+
 def test_ws_track_switch(tmp_path):
     client = _client_with_tracks(tmp_path, "monza")
     with client, client.websocket_connect("/ws/sim") as ws:

@@ -19,7 +19,8 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from f1rl.track.build import BuildConfig, build_track, save_track
+from f1rl.track.build import DEFAULT_CACHE_DIR, BuildConfig, build_track, save_track
+from f1rl.track.loader import write_catalog
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs" / "track"
 SKIP = {"oval"}  # the procedural oval is not a real-circuit build
@@ -58,6 +59,10 @@ def main(argv: list[str]) -> int:
             failures.append((cid, str(e)))
             print(f"  FAILED: {e}")
             traceback.print_exc()
+
+    # Refresh the pre-baked selector catalog so a new/rebuilt circuit shows up preloaded.
+    if rows:
+        write_catalog(DEFAULT_CACHE_DIR)
 
     _print_summary(rows, failures)
     return 0 if rows and not failures else (0 if rows else 1)

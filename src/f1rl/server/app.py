@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from omegaconf import DictConfig
 
@@ -44,7 +44,15 @@ from f1rl.sim.autopilot import CenterlineAutopilot
 from f1rl.sim.loop import FieldSimLoop, SimConfig, SimLoop
 from f1rl.sim.policy_pilot import PolicyPilot
 from f1rl.sim.recorder import TrajectoryError, TrajectoryRecorder, load_trajectory
-from f1rl.track.loader import DEFAULT_TRACKS_DIR, list_tracks, load_track
+from f1rl.track.loader import (
+    CATALOG_FILE,
+    DEFAULT_TRACKS_DIR,
+    list_tracks,
+    load_track,
+    track_api_path,
+    write_catalog,
+    write_track_api,
+)
 from f1rl.track.schema import Track
 from f1rl.utils.config import load_config, load_track_config
 
@@ -173,7 +181,19 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
     )
 
     @app.get("/api/tracks")
-    def get_tracks() -> dict[str, Any]:
+    def get_tracks() -> Any:
+        # Serve the pre-baked _catalog.json bytes verbatim (wrapped), skipping the reload of
+        # every .npz and any JSON re-serialization. Falls back to a live scan if the bake is
+        # missing/unreadable, so the route degrades gracefully instead of failing.
+        catalog_file = tracks_dir / CATALOG_FILE
+        if catalog_file.is_file():
+            try:
+                return Response(
+                    content=b'{"tracks":' + catalog_file.read_bytes() + b"}",
+                    media_type="application/json",
+                )
+            except OSError:
+                pass
         return {"tracks": list_tracks(tracks_dir)}
 
     @app.get("/api/checkpoints")
@@ -196,12 +216,24 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"unreadable calendar table: {e}") from e
 
     @app.get("/track/{track_id}")
-    def get_track(track_id: str) -> dict[str, Any]:
+    def get_track(track_id: str) -> Any:
+        # The procedural oval is config-driven, so always build it.
+        if track_id == "oval":
+            tk, _, _ = track_meta("oval")
+            return tk.to_api_dict()
+        # Real circuits: serve the pre-baked <id>.api.json bytes verbatim (~1 ms, no numpy
+        # load, no JSON re-serialize). Fall back to rebuilding from the .npz if the bake is
+        # missing/unreadable; a circuit with neither is a 404.
+        api_file = track_api_path(track_id, tracks_dir)
+        if api_file.is_file():
+            try:
+                return Response(content=api_file.read_bytes(), media_type="application/json")
+            except OSError:
+                pass
         try:
-            tk, _, _ = track_meta(track_id)
+            return load_track(track_id, tracks_dir=tracks_dir).to_api_dict()
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
-        return tk.to_api_dict()
 
     @app.get("/api/meta")
     def get_meta() -> dict[str, Any]:
@@ -230,6 +262,9 @@ def create_app(cfg: DictConfig | None = None) -> FastAPI:
         # Backup previous cache before overwriting, so a bad edit is reversible (rollback).
         shutil.copy2(cache, cache.with_suffix(".npz.bak"))
         track.save_npz(cache)
+        # Re-bake the served payloads so /track and /api/tracks reflect the edit immediately.
+        write_track_api(track, tracks_dir)
+        write_catalog(tracks_dir)
         return {"ok": True, "id": track_id, "condition": edit.condition}
 
     @app.get("/recordings")
