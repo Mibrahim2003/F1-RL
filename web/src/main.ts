@@ -16,8 +16,8 @@ import { Hud } from "./hud/telemetry.ts";
 import { ReplayPlayer, fetchRecording, listRecordings } from "./replay/player.ts";
 import { TrackSelector } from "./ui/selector.ts";
 import { ConfigPanel } from "./ui/config_panel.ts";
-import { PolicyPicker } from "./ui/policy_picker.ts";
 import { CalendarPanel } from "./ui/calendar.ts";
+import { StartLights } from "./ui/lights.ts";
 import type { Meta, Mode, SimMode, StateFrame, SurfaceEdit, Track } from "./types.ts";
 
 const $ = (id: string): HTMLElement => {
@@ -42,14 +42,17 @@ let currentTrack: Track | null = null;
 const trackCache = new Map<string, Track>();
 
 const selector = new TrackSelector($("stage"), (id) => void switchTrack(id));
+
+// Configure-mode panel: surface sliders + dry/wet, car glyph, and (moved off the viewport)
+// the watch-mode driver picker and the live field size.
 const configPanel = new ConfigPanel($("stage"), {
   onPreview: (edit) => previewSurfaces(edit),
   onSave: (edit) => saveSurfaces(edit),
+  onResume: () => {
+    // "& RACE": run the F1 start-light sequence, then drop into a running watch session.
+    void startRace();
+  },
   onGlyph: (style) => renderer.setGlyph(style),
-});
-
-// Watch-live: pick the centerline autopilot or a trained checkpoint (mounted in the viewport).
-const policyPicker = new PolicyPicker($("viewport"), {
   onAutopilot: () => socket.sendPolicy("autopilot"),
   onCheckpoint: (id) => socket.sendPolicy("checkpoint", id),
   onField: (n) => {
@@ -61,6 +64,18 @@ const policyPicker = new PolicyPicker($("viewport"), {
 
 // Phase 4 result view: the lap-time-vs-pole table across the calendar (toggle with T).
 const calendar = new CalendarPanel($("viewport"));
+
+// F1 start-light gantry, shown over the track when leaving config via SAVE & RACE.
+const lights = new StartLights($("viewport"));
+
+/** SAVE & RACE: clear any unsaved preview, run the start lights, then resume in watch mode. */
+async function startRace(): Promise<void> {
+  if (store.get().mode !== "configure") return;
+  configPanel.hide();
+  if (currentTrack) renderer.setTrack(currentTrack, false); // drop unsaved surface preview
+  await lights.run();
+  setMode("watch"); // sends watch + play; the race begins exactly at lights-out
+}
 
 const keyboard = new Keyboard(
   (input) => socket.sendInput(input.steer, input.throttle, input.brake, false),
@@ -75,23 +90,23 @@ const socket = new SimSocket({
       void listRecordings().catch(() => {});
     } else if (ev.event === "policy_error") {
       // non-fatal: server fell back to the autopilot, viewport keeps streaming
-      policyPicker.reset();
-      policyPicker.setStatus(
+      configPanel.resetPolicy();
+      configPanel.setPolicyStatus(
         `Checkpoint '${ev.id ?? ""}' failed to load — using autopilot.`,
         "error",
       );
     } else if (ev.event === "policy_changed") {
       if (ev.source === "checkpoint") {
-        policyPicker.setStatus(
+        configPanel.setPolicyStatus(
           `Policy: ${ev.id ?? ""} (${ev.circuit_id ?? "?"})`,
           "ok",
         );
       } else {
-        policyPicker.setStatus("Autopilot (centerline)", "");
+        configPanel.setPolicyStatus("Autopilot (centerline)", "");
       }
     } else if (ev.event === "field_changed" && ev.n_agents !== undefined) {
-      // server confirms the new live field size; reflect it in the watch-mode picker
-      policyPicker.setField(ev.n_agents);
+      // server confirms the new live field size; reflect it in the config panel
+      configPanel.setField(ev.n_agents);
     } else if (ev.event === "track_changed" && ev.pole_time_s !== undefined) {
       // server confirms the switch and sends the new circuit's pace meta
       hud.setMeta({
@@ -122,6 +137,9 @@ let desiredField = 1;
 function syncServer(): void {
   const mode = store.get().mode;
   if (mode !== "configure" && mode !== "replay") socket.sendMode(mode as SimMode);
+  // Boot/config: keep the server paused so no race runs behind the set-up screen. SAVE & RACE
+  // (startRace -> setMode "watch") sends play when the start lights go out.
+  else if (mode === "configure") socket.sendControl("pause");
   if (desiredField > 1) socket.sendField(desiredField);
 }
 
@@ -207,9 +225,8 @@ async function saveSurfaces(edit: SurfaceEdit): Promise<boolean> {
     trackCache.set(id, fresh); // keep the cache in step with the saved edit
     renderer.setTrack(fresh, false);
     store.set({ edit: "saved", lowConfidence: fresh.low_confidence });
-    // Seamless save: drop straight back into watch and resume. The server never reset the sim
-    // on entering configure (only paused), so the field picks up from where it stopped.
-    if (store.get().mode === "configure") setMode("watch");
+    // POST only — the panel's onResume drives the seamless return to watch (so a glyph/driver/
+    // field-only change also resumes, with no needless surface write).
     return true;
   } catch {
     return false;
@@ -226,6 +243,7 @@ function openConfigPanel(): void {
     gravel_width: t.gravel_width.length ? Math.max(0, ...t.gravel_width) : 0,
     condition: "dry",
     glyph: renderer.getGlyph(),
+    field: desiredField,
     trackName: t.name,
     lowConfidence: t.low_confidence,
   });
@@ -272,10 +290,6 @@ store.subscribe((s) => {
   // overlays
   $("manual-overlay").classList.toggle("hidden", s.mode !== "manual");
   $("replay-scrub").classList.toggle("hidden", s.mode !== "replay");
-
-  // watch-live policy picker is visible only while watching a live run
-  if (s.mode === "watch") policyPicker.show();
-  else policyPicker.hide();
 
   // engine-offline / error banner
   const banner = $("banner");
@@ -571,7 +585,8 @@ async function start(): Promise<void> {
     updateCircuitChip(track);
     store.set({ trackId: meta.track_id, lowConfidence: track.low_confidence });
     void selector.refresh(); // populate the catalog for the selector
-    void policyPicker.refresh(); // populate the watch-live checkpoint dropdown
+    void configPanel.refresh(); // populate the DRIVER checkpoint dropdown in config
+    openConfigPanel(); // boot into the race set-up screen (default mode is configure)
   } catch {
     // no backend yet — shell still renders; banner shown via store
     hud.reset();

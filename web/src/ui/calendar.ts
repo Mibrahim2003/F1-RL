@@ -4,7 +4,7 @@
  * until toggled (press T in watch mode); a 404 (no table yet) shows a friendly note instead of
  * crashing. Reuses the Phase-1 timing colors for the delta column.
  *
- * Self-contained like PolicyPicker: builds its own DOM under a host element, renders with
+ * Self-contained like TrackSelector: builds its own DOM under a host element, renders with
  * textContent (no injection), and never crashes on a missing/partial table.
  */
 

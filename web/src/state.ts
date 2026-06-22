@@ -37,9 +37,11 @@ type Listener = (s: Readonly<AppState>) => void;
 export class Store {
   private state: AppState = {
     ui: "loading",
-    mode: "watch",
+    // Boot into configure (race set-up), not a running watch session — the user sets conditions
+    // and then triggers the start-light sequence with SAVE & RACE.
+    mode: "configure",
     engineConnected: false,
-    running: true,
+    running: false,
     speed: 1,
     errorMessage: null,
     trackId: "oval",

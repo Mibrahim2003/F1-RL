@@ -823,6 +823,8 @@
   right: 22px;
   z-index: 40;
   width: 300px;
+  max-height: calc(100% - 106px);
+  overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--hair-12);
   border-radius: 10px;
@@ -859,6 +861,53 @@
   background: var(--slower);
   padding: 2px 5px;
   border-radius: 3px;
+}
+/* ---- collapsible main-option accordion ---- */
+.cfg-accordion {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cfg-opt {
+  border: 1px solid var(--hair-12);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.cfg-opt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: var(--panel-2);
+  border: none;
+  cursor: pointer;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  font-size: 11px;
+}
+.cfg-opt-head:hover {
+  color: #fff;
+}
+.cfg-chevron {
+  color: var(--text-3);
+  transition: transform 0.15s ease;
+  transform: rotate(-90deg);
+}
+.cfg-opt.open .cfg-chevron {
+  transform: rotate(0deg);
+}
+.cfg-opt-body {
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border-top: 1px solid var(--hair-10);
+}
+.cfg-opt.open .cfg-opt-body {
+  display: flex;
 }
 .cfg-fields {
   display: flex;
@@ -950,42 +999,8 @@
   cursor: default;
 }
 
-/* ---- watch-live policy picker ---- */
-.policy-picker {
-  position: absolute;
-  top: 14px;
-  left: 14px;
-  z-index: 40;
-  width: 280px;
-  background: var(--panel);
-  border: 1px solid var(--hair-12);
-  border-radius: 10px;
-  box-shadow: 0 16px 50px rgba(0, 0, 0, 0.55);
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.pp-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.pp-title {
-  font-family: var(--font-display);
-  font-weight: 800;
-  letter-spacing: 2px;
-  font-size: 12px;
-  color: var(--text);
-}
-.pp-hint {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.5px;
-  color: var(--text-3);
-}
-.pp-select {
+/* ---- DRIVER option (config): checkpoint picker ---- */
+.cfg-driver-select {
   width: 100%;
   background: var(--panel-2);
   border: 1px solid var(--hair-12);
@@ -996,36 +1011,28 @@
   padding: 7px 9px;
   cursor: pointer;
 }
-.pp-status {
+.cfg-driver-status {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.3px;
   min-height: 12px;
   color: var(--text-2);
 }
-.pp-status[data-kind="error"] {
+.cfg-driver-status[data-kind="error"] {
   color: var(--red);
 }
-.pp-status[data-kind="ok"] {
+.cfg-driver-status[data-kind="ok"] {
   color: var(--pb);
 }
-.pp-field-row {
+
+/* ---- CARS ON TRACK option (config): live field size ---- */
+.cfg-field-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  border-top: 1px solid var(--hair-12);
-  padding-top: 8px;
 }
-.pp-field-label {
+.cfg-field-input {
   flex: 1;
-  font-family: var(--font-display);
-  font-weight: 800;
-  letter-spacing: 1.5px;
-  font-size: 11px;
-  color: var(--text);
-}
-.pp-field-input {
-  width: 56px;
   background: var(--panel-2);
   border: 1px solid var(--hair-12);
   border-radius: 6px;
@@ -1035,7 +1042,7 @@
   text-align: center;
   padding: 6px 4px;
 }
-.pp-field-btn {
+.cfg-field-btn {
   background: var(--panel-2);
   border: 1px solid var(--hair-12);
   border-radius: 6px;
@@ -1044,22 +1051,80 @@
   font-weight: 800;
   letter-spacing: 1px;
   font-size: 11px;
-  padding: 6px 12px;
+  padding: 6px 14px;
   cursor: pointer;
 }
-.pp-field-btn:hover {
+.cfg-field-btn:hover {
   border-color: var(--red);
   color: var(--red);
 }
-.pp-field-status {
+.cfg-field-status {
   font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.3px;
   min-height: 12px;
   color: var(--text-2);
 }
-.pp-field-status[data-kind="ok"] {
+.cfg-field-status[data-kind="ok"] {
   color: var(--pb);
+}
+
+/* ---- F1 start-light gantry (SAVE & RACE → lights out) ---- */
+.start-lights {
+  position: absolute;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  background: rgba(6, 6, 10, 0.62);
+  backdrop-filter: blur(2px);
+}
+.sl-gantry {
+  display: flex;
+  gap: 16px;
+  padding: 22px 26px;
+  background: var(--deep);
+  border: 1px solid var(--hair-12);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.65);
+}
+.sl-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 4px;
+}
+.sl-lamp {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: #190303;
+  border: 2px solid #2c0a0a;
+  transition:
+    background 0.12s ease,
+    box-shadow 0.12s ease;
+}
+.sl-col.on .sl-lamp {
+  background: var(--red);
+  border-color: #ff5a52;
+  box-shadow:
+    0 0 20px 5px rgba(225, 6, 0, 0.7),
+    inset 0 0 10px rgba(255, 140, 130, 0.6);
+}
+.sl-caption {
+  min-height: 28px;
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 5px;
+  font-size: 22px;
+  color: var(--text-3);
+}
+.sl-caption.go {
+  color: var(--pb);
+  animation: f1pulse 0.45s ease-in-out;
 }
 
 /* ---- Phase 4 calendar result view (lap time vs pole) ---- */

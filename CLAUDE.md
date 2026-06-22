@@ -49,8 +49,11 @@ The Phase 1 interactive app has two halves. Launch the Python backend, then the 
 # Frontend: Vite dev server (needs Node/npm)
 cd web && npm install && npm run dev   # then open the printed localhost URL
 
-# Frontend typecheck / build gate (there are no frontend unit tests — tsc is the check)
-cd web && npx tsc --noEmit             # typecheck only
+# Frontend tests (Vitest + jsdom — headless DOM tests for the vanilla-TS UI modules)
+cd web && npm test                                    # all UI tests (vitest run)
+cd web && npx vitest run src/ui/config_panel.test.ts  # one file
+# Frontend typecheck / build gate
+cd web && npx tsc --noEmit             # typecheck only (test files live in src/, so they gate too)
 cd web && npm run build                # tsc && vite build
 ```
 
@@ -93,10 +96,12 @@ Vanilla TypeScript + Vite, no UI framework. `web/src/main.ts` is the wiring hub:
 
 - `net/socket.ts` (`SimSocket`) — typed `/ws/sim` client with backoff auto-reconnect. `send()` **silently drops** anything pushed before the socket is `OPEN`.
 - `viewport/renderer.ts` (`Renderer` + `camera.ts`) — Canvas 2D; world-meter `Path2D` geometry built once per track, ~60 fps with interpolation between 20 Hz state frames. Renders a single car **or** a field — a frame with `cars[].length > 1` flips `fieldMode` and uses per-car interpolation buffers. The layout is fluid (the stage fills the window; no fixed 1920×1080 + transform scale).
-- `ui/` — `TrackSelector`, `ConfigPanel` (surface editor), `PolicyPicker` (watch-mode driver **and** field-size picker), `CalendarPanel` (Phase 4 result table). `input/keyboard.ts` is manual-drive only (arrows/WASD), enabled solely in manual mode.
+- `ui/` — `TrackSelector`; `ConfigPanel` (the configure-mode **accordion**: surface sliders + dry/wet under ROAD CONDITION, the car glyph, the **driver picker**, and the **cars-on-track** field size — the driver/field controls were once a separate `PolicyPicker` overlay floating on the viewport, now folded in so they no longer block the track); `StartLights` (`lights.ts`, the F1 five-light start gantry); `CalendarPanel` (Phase 4 result table). `input/keyboard.ts` is manual-drive only (arrows/WASD), enabled solely in manual mode.
 - `hud/`, `replay/` — telemetry HUD and the replay scrubber/player.
 
 **The server starts every `/ws/sim` connection fresh** — default `manual` mode, single car (`_Session`/`_SimState` in `server/app.py`). The client is the source of truth for mode/field, so it resyncs the server **in the socket's `onOpen`** (`syncServer` in `main.ts`), never right after `connect()` — a message sent while the socket is still `CONNECTING` is dropped, and this race also bites after every auto-reconnect. Entering `configure` pauses the server (`sendControl("pause")`); returning to watch/manual must `sendControl("play")` or the field stays frozen while the client shows it running.
+
+**The app boots into `configure` (paused)** — `Store`'s default mode, with `syncServer` sending `pause` on connect — so the user sets the race up before anything runs. The only seamless way out is the config panel's **SAVE & RACE** button (`startRace` in `main.ts`): it POSTs surfaces only if a slider/condition actually changed (`dirty` flag — avoids needless `.npz`/`.bak` writes), commits a typed-but-not-SET field size, runs the `StartLights` sequence, then `setMode("watch")` to play — the race begins exactly at lights-out. Driver and field-size changes apply **live over the socket** during configure (the server keeps the active policy + `n_agents` across a `mode` message), so they are not gated behind the save.
 
 ## Conventions that are easy to get wrong
 
