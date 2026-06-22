@@ -26,13 +26,6 @@ const $ = (id: string): HTMLElement => {
   return el;
 };
 
-// ---------- stage fit-to-window scaling ----------
-function fitStage(): void {
-  const stage = $("stage");
-  const s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
-  stage.style.transform = `scale(${s})`;
-}
-
 // ---------- module instances ----------
 const store = new Store();
 const canvas = $("track-canvas") as HTMLCanvasElement;
@@ -42,6 +35,11 @@ const replay = new ReplayPlayer(renderer, hud);
 
 // Canonical loaded track (configure-mode previews mutate clones, not this).
 let currentTrack: Track | null = null;
+
+// Client-side cache of fetched circuit geometry, keyed by track id. Switching back to a
+// visited circuit skips the network entirely (the server already serves a pre-baked payload,
+// but a revisit then costs nothing). Surface saves replace the cached entry with the fresh one.
+const trackCache = new Map<string, Track>();
 
 const selector = new TrackSelector($("stage"), (id) => void switchTrack(id));
 const configPanel = new ConfigPanel($("stage"), {
@@ -54,6 +52,11 @@ const configPanel = new ConfigPanel($("stage"), {
 const policyPicker = new PolicyPicker($("viewport"), {
   onAutopilot: () => socket.sendPolicy("autopilot"),
   onCheckpoint: (id) => socket.sendPolicy("checkpoint", id),
+  onField: (n) => {
+    desiredField = n;
+    socket.sendField(n);
+    renderer.clearPoses();
+  },
 });
 
 // Phase 4 result view: the lap-time-vs-pole table across the calendar (toggle with T).
@@ -86,6 +89,9 @@ const socket = new SimSocket({
       } else {
         policyPicker.setStatus("Autopilot (centerline)", "");
       }
+    } else if (ev.event === "field_changed" && ev.n_agents !== undefined) {
+      // server confirms the new live field size; reflect it in the watch-mode picker
+      policyPicker.setField(ev.n_agents);
     } else if (ev.event === "track_changed" && ev.pole_time_s !== undefined) {
       // server confirms the switch and sends the new circuit's pace meta
       hud.setMeta({
@@ -98,9 +104,26 @@ const socket = new SimSocket({
       if (currentTrack) updateCircuitChip(currentTrack);
     }
   },
-  onOpen: () => store.set({ engineConnected: true }),
+  onOpen: () => {
+    store.set({ engineConnected: true });
+    // The socket opens asynchronously, so any state we pushed before it was OPEN was dropped.
+    // Resync the server with the client's intent now that the connection is ready — this also
+    // restores state after an auto-reconnect (the server starts each connection fresh).
+    syncServer();
+  },
   onClose: () => store.set({ engineConnected: false }),
 });
+
+// Desired live field size (Phase 5). Tracked here so it survives a reconnect: the server
+// builds each /ws/sim connection fresh (single car), so we re-send it on every open.
+let desiredField = 1;
+
+/** Push the client's current mode + field size to a freshly opened socket. */
+function syncServer(): void {
+  const mode = store.get().mode;
+  if (mode !== "configure" && mode !== "replay") socket.sendMode(mode as SimMode);
+  if (desiredField > 1) socket.sendField(desiredField);
+}
 
 // ---------- state frame handling ----------
 function onStateFrame(frame: StateFrame): void {
@@ -124,10 +147,15 @@ async function switchTrack(id: string): Promise<void> {
   store.set({ loadingTrack: true });
   socket.sendTrack(id);
   try {
-    const track = await fetch(`/track/${id}`).then((r) => {
-      if (!r.ok) throw new Error(`/track/${id} ${r.status}`);
-      return r.json() as Promise<Track>;
-    });
+    let track = trackCache.get(id);
+    if (!track) {
+      const fetched = await fetch(`/track/${id}`).then((r) => {
+        if (!r.ok) throw new Error(`/track/${id} ${r.status}`);
+        return r.json() as Promise<Track>;
+      });
+      trackCache.set(id, fetched);
+      track = fetched;
+    }
     currentTrack = track;
     renderer.resize();
     renderer.setTrack(track, true);
@@ -176,8 +204,12 @@ async function saveSurfaces(edit: SurfaceEdit): Promise<boolean> {
     if (!r.ok) return false;
     const fresh = await fetch(`/track/${id}`).then((res) => res.json() as Promise<Track>);
     currentTrack = fresh;
+    trackCache.set(id, fresh); // keep the cache in step with the saved edit
     renderer.setTrack(fresh, false);
     store.set({ edit: "saved", lowConfidence: fresh.low_confidence });
+    // Seamless save: drop straight back into watch and resume. The server never reset the sim
+    // on entering configure (only paused), so the field picks up from where it stopped.
+    if (store.get().mode === "configure") setMode("watch");
     return true;
   } catch {
     return false;
@@ -315,6 +347,9 @@ function setMode(mode: Mode): void {
     return;
   }
   socket.sendMode(mode as SimMode);
+  // Resume the server too — configure paused it (sendControl("pause")); a bare sendMode would
+  // leave the server paused while the client shows running, so the field would stay frozen.
+  socket.sendControl("play");
   renderer.clearPoses();
   hud.reset();
   store.set({ running: true });
@@ -356,7 +391,8 @@ $("speed-seg").addEventListener("click", (e) => {
   else socket.sendControl("play", speed);
 });
 
-$("btn-run").addEventListener("click", () => {
+// Toggle play/pause — shared by the run button and the spacebar shortcut.
+function togglePlayPause(): void {
   const s = store.get();
   const next = !s.running;
   store.set({ running: next });
@@ -366,7 +402,9 @@ $("btn-run").addEventListener("click", () => {
   } else {
     socket.sendControl(next ? "play" : "pause");
   }
-});
+}
+
+$("btn-run").addEventListener("click", togglePlayPause);
 
 $("btn-restart").addEventListener("click", () => {
   const s = store.get();
@@ -434,6 +472,17 @@ canvas.addEventListener(
   { passive: false },
 );
 window.addEventListener("keydown", (e) => {
+  // Spacebar toggles play/pause (same as the run button) — but not while typing in a
+  // form field (the field-size box, sliders), where Space is normal text/control input.
+  const tag = (e.target as HTMLElement)?.tagName;
+  // Skip form controls: INPUT/SELECT/TEXTAREA take Space as text; a focused BUTTON activates
+  // natively on Space (double-fire otherwise). The run button is a <div>, so it's unaffected.
+  const formFocus = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "BUTTON";
+  if (e.code === "Space" && !formFocus) {
+    e.preventDefault(); // never scroll the page
+    togglePlayPause();
+    return;
+  }
   if (e.code === "Backquote") {
     renderer.toggleDebug();
     $("debug").classList.toggle("on", renderer.isDebugOn());
@@ -451,6 +500,7 @@ window.addEventListener("keydown", (e) => {
   } else if (/^Digit[1-9]$/.test(e.code) && store.get().mode === "watch") {
     // Phase 5: pick the live field size (1 = single car, 2..9 = a grid of N cars).
     const n = Number(e.code.slice(5));
+    desiredField = n;
     socket.sendField(n);
     renderer.clearPoses();
   }
@@ -494,14 +544,13 @@ function loop(now: number): void {
 // ---------- canvas sizing ----------
 function resizeCanvas(): void {
   renderer.resize();
-  if (renderer.hasTrack()) {
-    // keep current view but re-fit only if no track interaction yet
-  }
+  // Fluid layout: the viewport box changes with the window, so re-fit the track to fill it.
+  // Skip while camera-follow is on — updateFollow recenters every frame, so a fit is moot.
+  if (currentTrack && !renderer.camera.follow) renderer.setTrack(currentTrack, true);
 }
 
 // ---------- async startup ----------
 async function start(): Promise<void> {
-  fitStage();
   resizeCanvas();
 
   // fetch meta + the default circuit (gracefully degrade if backend offline)
@@ -515,6 +564,7 @@ async function start(): Promise<void> {
       return r.json() as Promise<Track>;
     });
     currentTrack = track;
+    trackCache.set(meta.track_id, track); // seed the cache with the default circuit
     renderer.resize();
     renderer.setTrack(track);
     hud.setMeta(meta);
@@ -527,17 +577,15 @@ async function start(): Promise<void> {
     hud.reset();
   }
 
-  // start with watch mode and connect
+  // Connect; the initial mode is sent from the socket's onOpen (syncServer), not here —
+  // sending before the socket is OPEN silently drops the message (the Phase 1 mode-race).
   socket.connect();
-  const startMode = store.get().mode;
-  if (startMode !== "configure" && startMode !== "replay") socket.sendMode(startMode);
 
   keyboard.attach();
   requestAnimationFrame(loop);
 }
 
 window.addEventListener("resize", () => {
-  fitStage();
   resizeCanvas();
 });
 

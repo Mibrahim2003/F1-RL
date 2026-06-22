@@ -91,27 +91,26 @@ body {
   }
 }
 
-/* the deep backdrop the scaled stage sits on */
+/* the deep backdrop the stage sits on */
 #app {
   position: fixed;
   inset: 0;
   background: var(--deep);
   display: flex;
-  align-items: center;
-  justify-content: center;
   overflow: hidden;
 }
 
-/* fixed 1920x1080 stage, scaled to fit the window */
+/* Fluid stage: fills the window at any size so it reads like fullscreen in a normal browser
+   tab (no fixed 1920x1080 + transform scale, which letterboxed and shrank the whole UI). The
+   flex column reflows — fixed top/bottom bars keep their designed size, the viewport takes the
+   rest. The 1920x1080 design is the reference, not a hard size. */
 #stage {
-  width: 1920px;
-  height: 1080px;
-  flex: 0 0 1920px;
-  transform-origin: center center;
+  width: 100%;
+  height: 100%;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   background: var(--base);
   color: var(--text);
   overflow: hidden;
-  box-shadow: 0 0 80px rgba(0, 0, 0, 0.6);
 }

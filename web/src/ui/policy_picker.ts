@@ -13,9 +13,15 @@ import type { CheckpointSummary } from "../types.ts";
 
 const AUTOPILOT_VALUE = "__autopilot__";
 
+// Field-size bounds mirror the server's FieldMessage validator ([1, 22]).
+const FIELD_MIN = 1;
+const FIELD_MAX = 22;
+
 export interface PolicyPickerCallbacks {
   onAutopilot: () => void;
   onCheckpoint: (id: string) => void;
+  /** Set the live field size (Phase 5 many-cars); n is clamped to [1, 22]. */
+  onField: (n: number) => void;
 }
 
 export class PolicyPicker {
@@ -24,6 +30,8 @@ export class PolicyPicker {
   private root!: HTMLElement;
   private select!: HTMLSelectElement;
   private status!: HTMLElement;
+  private fieldInput!: HTMLInputElement;
+  private fieldStatus!: HTMLElement;
   private checkpoints: CheckpointSummary[] = [];
 
   constructor(host: HTMLElement, cb: PolicyPickerCallbacks) {
@@ -68,6 +76,24 @@ export class PolicyPicker {
     this.setStatus("", "");
   }
 
+  /** Reflect the server-confirmed field size (e.g. after a field_changed event). */
+  setField(n: number): void {
+    const clamped = clampField(n);
+    this.fieldInput.value = String(clamped);
+    this.fieldStatus.textContent =
+      clamped === 1 ? "Single car" : `${clamped} cars on the grid`;
+    this.fieldStatus.dataset.kind = "ok";
+  }
+
+  /** Read, clamp, and apply the field-size input — sends one field message. */
+  private applyField(): void {
+    const n = clampField(Number(this.fieldInput.value));
+    this.fieldInput.value = String(n);
+    this.fieldStatus.textContent = n === 1 ? "Single car…" : `Building ${n}-car grid…`;
+    this.fieldStatus.dataset.kind = "";
+    this.cb.onField(n);
+  }
+
   private build(): void {
     const root = document.createElement("div");
     root.className = "policy-picker hidden";
@@ -77,11 +103,20 @@ export class PolicyPicker {
         <span class="pp-hint">backtick = beams overlay</span>
       </div>
       <select class="pp-select"></select>
-      <div class="pp-status" data-kind=""></div>`;
+      <div class="pp-status" data-kind=""></div>
+      <div class="pp-field-row">
+        <span class="pp-field-label">CARS ON TRACK</span>
+        <input class="pp-field-input" type="number" min="${FIELD_MIN}" max="${FIELD_MAX}"
+               step="1" value="1" />
+        <button class="pp-field-btn" type="button">SET</button>
+      </div>
+      <div class="pp-field-status" data-kind=""></div>`;
     this.host.appendChild(root);
     this.root = root;
     this.select = root.querySelector(".pp-select") as HTMLSelectElement;
     this.status = root.querySelector(".pp-status") as HTMLElement;
+    this.fieldInput = root.querySelector(".pp-field-input") as HTMLInputElement;
+    this.fieldStatus = root.querySelector(".pp-field-status") as HTMLElement;
 
     this.select.addEventListener("change", () => {
       const value = this.select.value;
@@ -91,6 +126,16 @@ export class PolicyPicker {
       } else {
         this.setStatus("Loading checkpoint…", "");
         this.cb.onCheckpoint(value);
+      }
+    });
+
+    // Apply the field size on SET click or Enter in the input.
+    const btn = root.querySelector(".pp-field-btn") as HTMLButtonElement;
+    btn.addEventListener("click", () => this.applyField());
+    this.fieldInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.applyField();
       }
     });
     this.renderOptions();
@@ -116,6 +161,12 @@ export class PolicyPicker {
     o.textContent = label;
     return o;
   }
+}
+
+/** Clamp a field size into the server's valid [1, 22] range (NaN -> 1). */
+function clampField(n: number): number {
+  if (!Number.isFinite(n)) return FIELD_MIN;
+  return Math.max(FIELD_MIN, Math.min(FIELD_MAX, Math.round(n)));
 }
 
 function formatSteps(n: number): string {
